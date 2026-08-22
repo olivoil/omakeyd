@@ -119,6 +119,6 @@ It never edits `~/.config/hypr`, `/etc/keyd`, or `/usr/share/omarchy`, and it do
 scripts/ci.sh
 ```
 
-The suite validates the plugin manifest and QML when Omarchy tooling is present, exercises catalogue and device filtering, and regression-tests the full keyd → XKB compensation path.
+The suite validates the plugin manifest and panel QML when Omarchy tooling is present, exercises catalogue and device filtering, and regression-tests the full keyd → XKB compensation path. Quattro's typed IPC entry points are smoke-tested in a running Omarchy shell because the standalone `qmllint 1.0` shipped on current Omarchy rejects that same valid syntax in first-party plugins.
 
 See [`docs/architecture.md`](docs/architecture.md) for the state model and [`docs/mapping-pipeline.md`](docs/mapping-pipeline.md) for the mapping math.
