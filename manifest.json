@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.olivoil.omakeyd",
+  "name": "Omakeyd",
+  "version": "0.1.0",
+  "author": "Olivier Melcher",
+  "description": "Search, create, and switch effective keyboard layouts on one explicit keyboard at a time.",
+  "license": "MIT",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Omakeyd.qml"
+  },
+  "barWidget": {
+    "displayName": "Omakeyd",
+    "description": "Per-keyboard layout switching with keyd and firmware-remap awareness.",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

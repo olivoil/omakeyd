@@ -1,0 +1,20 @@
+partial alphanumeric_keys
+xkb_symbols "basic" {
+    include "us(colemak_base)"
+
+    name[Group1]= "English (Colemak-DH Yoga)";
+
+    key <AD05> { [            b,            B,      dead_breve,       asciitilde ] };
+
+    key <AC05> { [            g,            G,     dead_ogonek,       asciitilde ] };
+    key <AC06> { [            m,            M,     dead_macron,       asciitilde ] };
+
+    key <LSGT> { [         less,      greater,       backslash,              bar ] };
+    key <AB01> { [            z,            Z,              ae,               AE ] };
+    key <AB02> { [            x,            X, dead_circumflex,       asciitilde ] };
+    key <AB03> { [            c,            C,        ccedilla,         Ccedilla ] };
+    key <AB04> { [            d,            D,  dead_diaeresis,       asciitilde ] };
+    key <AB05> { [            v,            V,              oe,               OE ] };
+    key <AB06> { [            k,            K,  dead_abovering,       asciitilde ] };
+    key <AB07> { [            h,            H,      dead_caron,       asciitilde ] };
+};

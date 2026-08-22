@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PLUGIN_ROOT))
+
+from omakeyd.core import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

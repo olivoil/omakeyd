@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-22T00:00:00Z",
+  "title": "Design System: Omakeyd",
+  "extensions": {
+    "colorMeta": {},
+    "typographyMeta": {},
+    "shadows": [],
+    "motion": [
+      {
+        "name": "state-change",
+        "value": "120-180ms ease-out",
+        "purpose": "Selection, focus, and inline disclosure only."
+      }
+    ],
+    "breakpoints": []
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "The Labeled Switchboard",
+    "overview": "Omakeyd is a compact, theme-native Quattro instrument. One continuous hierarchy keeps the selected keyboard, effective layout, and mapping path legible before any change is applied.",
+    "keyCharacteristics": [
+      "Theme-native, compact, and textually explicit.",
+      "One continuous panel hierarchy, not a dashboard of cards.",
+      "State motion only, 120-180 ms, with no entrance choreography.",
+      "Device identity and mapping provenance are visible before commitment."
+    ],
+    "rules": [
+      {
+        "name": "The Borrowed Palette Rule",
+        "body": "A plugin that looks correct in only one Omarchy theme is incorrect.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Signal Rule",
+        "body": "Accent color identifies the current selection, focus, and the primary apply action. It is never decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Names Rule",
+        "body": "Prefer the human label first, then the exact system identifier in quieter text.",
+        "section": "typography"
+      },
+      {
+        "name": "The Single Surface Rule",
+        "body": "Do not nest card surfaces inside the panel. Separators, spacing, and headers establish hierarchy.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do state the selected keyboard immediately above all layout actions.",
+      "Do distinguish effective physical layout from raw XKB keymap whenever keyd or firmware remapping is present.",
+      "Do reuse Quattro controls and dynamic theme tokens without private approximations."
+    ],
+    "donts": [
+      "Don't build a global language flag that hides the target keyboard.",
+      "Don't build a settings dashboard made from nested cards.",
+      "Don't report raw XKB names as if they were always the effective physical layout.",
+      "Don't rewrite /etc/keyd or ask for a password on every switch.",
+      "Don't use decorative gamer styling, neon accents, glassmorphism, or animated keyboard theatrics."
+    ]
+  }
+}
