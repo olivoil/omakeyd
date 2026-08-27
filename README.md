@@ -28,9 +28,9 @@ Omakeyd separates the requested physical layout from the runtime XKB layout. For
 - Restores only choices explicitly made through Omakeyd after a Hyprland config reload.
 - Refuses ambiguous keyd pipelines instead of changing a guessed device.
 
-## This machine's mapping
+## How compensation works
 
-Omakeyd detects the current Yoga setup as:
+For example, Omakeyd can detect a laptop keyboard that keyd remaps before XKB:
 
 | Stage | Device/layout | Meaning |
 |---|---|---|
@@ -49,20 +49,20 @@ z x c d v k h , . /
 
 The same XKB definition is retained in [`presets/colemak_dh_yoga`](presets/colemak_dh_yoga). Omakeyd does not overwrite the installed copy.
 
-The connected Logitech PRO X is a separate direct-XKB target and remains US unless it is selected explicitly. A Voyager that remaps in firmware can be described in **Physical remap** using the rows it emits; Omakeyd will then compensate layouts for that device too.
+A separate direct-XKB keyboard remains unchanged unless it is selected explicitly. A keyboard that remaps in firmware can be described in **Physical remap** using the rows it emits; Omakeyd will then compensate layouts for that device too.
 
 ## Install
 
-From GitHub after the repository is published:
+Review the repository, then add the plugin:
 
 ```bash
-omarchy plugin add https://github.com/olivoil/omakeyd --enable
+omarchy plugin add https://github.com/olivoil/omakeyd.git
 ```
 
-From this local repository:
+Accept the prompt to enable Omakeyd. For an unattended install from a repository you already trust:
 
 ```bash
-omarchy plugin add file:///home/olivier/Code/github.com/olivoil/omakeyd --enable --yes
+omarchy plugin add https://github.com/olivoil/omakeyd.git --enable --yes
 ```
 
 Then remove the first-party layout badge if both are on the bar:
@@ -75,6 +75,20 @@ Quattro reloads user plugin code automatically. If needed:
 
 ```bash
 omarchy-shell shell rescanPlugins
+```
+
+## Update
+
+Review and apply the next fast-forward update:
+
+```bash
+omarchy plugin update io.github.olivoil.omakeyd
+```
+
+Or update all Git-managed plugins:
+
+```bash
+omarchy plugin update --all
 ```
 
 ## Use
@@ -97,7 +111,11 @@ bin/omakeyd doctor
 
 Every command prints JSON. `apply` always requires `--device`; there is no global or `all` target.
 
-## Files and permissions
+## Security and system access
+
+Plugins run unsandboxed inside `omarchy-shell` when enabled. Review the source before installing it.
+
+Omakeyd invokes the local `hyprctl` and `xkbcli` commands to discover keyboards, inspect and validate layouts, and apply per-device XKB settings. It reads installed XKB metadata and simple mappings from `/etc/keyd/*.conf` when keyd is present. It makes no network requests.
 
 Omakeyd uses only user-owned state:
 
@@ -106,6 +124,8 @@ Omakeyd uses only user-owned state:
 - `~/.config/xkb/symbols/omakeyd_comp_*`: deterministic compensation layouts.
 
 It never edits `~/.config/hypr`, `/etc/keyd`, or `/usr/share/omarchy`, and it does not use `sudo` or `pkexec`.
+
+Its small background service runs once when loaded and after Hyprland configuration reloads. It reapplies only per-device layouts previously selected through Omakeyd.
 
 ## Limits
 
@@ -117,6 +137,12 @@ It never edits `~/.config/hypr`, `/etc/keyd`, or `/usr/share/omarchy`, and it do
 
 ```bash
 scripts/ci.sh
+```
+
+To run Omarchy's structural validator directly:
+
+```bash
+omarchy plugin validate .
 ```
 
 The suite validates the plugin manifest and panel QML when Omarchy tooling is present, exercises catalogue and device filtering, and regression-tests the full keyd → XKB compensation path. Quattro's typed IPC entry points are smoke-tested in a running Omarchy shell because the standalone `qmllint 1.0` shipped on current Omarchy rejects that same valid syntax in first-party plugins.
