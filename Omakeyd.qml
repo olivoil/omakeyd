@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -19,27 +18,24 @@ BarWidget {
     var url = String(Qt.resolvedUrl("bin/omakeyd"))
     return decodeURIComponent(url.replace(/^file:\/\//, ""))
   }
-  readonly property var keyboards: Array.isArray(snapshot.keyboards) ? snapshot.keyboards : []
-  readonly property var favorites: Array.isArray(snapshot.favorites) ? snapshot.favorites : []
-  readonly property string selectedDevice: String(snapshot.selectedDevice || "")
-  readonly property var currentKeyboard: {
-    for (var i = 0; i < keyboards.length; i++)
-      if (String(keyboards[i].name) === selectedDevice) return keyboards[i]
-    return keyboards.length > 0 ? keyboards[0] : null
+  readonly property var profiles: Array.isArray(snapshot.profiles) ? snapshot.profiles : []
+  readonly property var layouts: Array.isArray(snapshot.layouts) ? snapshot.layouts : []
+  readonly property string selectedProfile: String(snapshot.selectedProfile || "")
+  readonly property var currentProfile: {
+    for (var i = 0; i < profiles.length; i++)
+      if (String(profiles[i].id) === selectedProfile) return profiles[i]
+    return profiles.length > 0 ? profiles[0] : null
   }
-  readonly property string indicatorText: currentKeyboard
-    ? String(currentKeyboard.effectiveBrief || "KB") : "KB"
+  readonly property string indicatorText: "\uf11c"
+    + (currentProfile ? "  " + String(currentProfile.currentBrief || "KB") : "")
   readonly property string indicatorTooltip: {
     if (backendError) return "Omakeyd\n" + backendError
-    if (!currentKeyboard) return "Omakeyd\nNo typing keyboard found"
+    if (!currentProfile) return "Omakeyd\nNo keyd keyboard profile found"
     var lines = [
-      String(currentKeyboard.effectiveName || "Unknown layout"),
-      String(currentKeyboard.label || currentKeyboard.name)
+      String(currentProfile.currentName || "Unknown layout"),
+      String(currentProfile.label || currentProfile.id)
     ]
-    if (String(currentKeyboard.rawKeymap || "")
-        && String(currentKeyboard.rawKeymap) !== String(currentKeyboard.effectiveName || ""))
-      lines.push("XKB: " + String(currentKeyboard.rawKeymap))
-    if (currentKeyboard.mappingDetail) lines.push(String(currentKeyboard.mappingDetail))
+    if (!currentProfile.ready) lines.push("Setup required")
     return lines.join("\n")
   }
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -53,7 +49,7 @@ BarWidget {
       return
     }
     refreshPending = false
-    snapshotProcess.command = [backendCommand, "snapshot", "--limit", "24"]
+    snapshotProcess.command = [backendCommand, "snapshot"]
     snapshotProcess.running = true
   }
 
@@ -65,6 +61,7 @@ BarWidget {
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
     if ("backendCommand" in target) target.backendCommand = root.backendCommand
+    if ("snapshot" in target) target.snapshot = root.snapshot
   }
 
   function togglePanel() {
@@ -79,31 +76,29 @@ BarWidget {
     if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
   }
 
-  function favoriteMatchesKeyboard(favorite, keyboard) {
-    if (!favorite || !keyboard) return false
-    return String(favorite.layout || "") === String(keyboard.effectiveLayout || "")
-      && String(favorite.variant || "") === String(keyboard.effectiveVariant || "")
+  function openSetup() {
+    if (panelLoader.item && panelLoader.item.showSetup) panelLoader.item.showSetup()
   }
 
-  function cycleFavorite(direction) {
-    if (!currentKeyboard || favorites.length < 2 || applyProcess.running) return
-    var current = -1
-    for (var i = 0; i < favorites.length; i++) {
-      if (favoriteMatchesKeyboard(favorites[i], currentKeyboard)) {
+  function openStudio() {
+    if (panelLoader.item && panelLoader.item.showStudio) panelLoader.item.showStudio()
+  }
+
+  function cycleLayout(direction) {
+    if (!currentProfile || !currentProfile.canApply || layouts.length < 2 || applyProcess.running)
+      return
+    var current = 0
+    for (var i = 0; i < layouts.length; i++) {
+      if (String(layouts[i].id) === String(currentProfile.currentLayoutId || "")) {
         current = i
         break
       }
     }
-    if (current < 0) current = 0
-    var next = (current + direction + favorites.length) % favorites.length
-    var favorite = favorites[next]
+    var next = (current + direction + layouts.length) % layouts.length
     applyProcess.command = [
       backendCommand, "apply",
-      "--device", selectedDevice,
-      "--layout", String(favorite.layout || ""),
-      "--variant", String(favorite.variant || ""),
-      "--name", String(favorite.name || ""),
-      "--brief", String(favorite.brief || "")
+      "--profile", selectedProfile,
+      "--layout-id", String(layouts[next].id || "")
     ]
     backendBusy = true
     applyProcess.running = true
@@ -113,23 +108,14 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
-  Connections {
-    target: Hyprland
-    function onRawEvent(event) {
-      if (!event) return
-      var name = String(event.name || "")
-      if (name === "activelayout" || name === "configreloaded") refreshTimer.restart()
-    }
-  }
-
   Timer {
     id: refreshTimer
-    interval: 420
+    interval: 300
     onTriggered: root.refresh()
   }
 
   Timer {
-    interval: 12000
+    interval: 10000
     repeat: true
     running: true
     onTriggered: root.refresh()
@@ -150,7 +136,8 @@ BarWidget {
           root.backendError = ""
           root.injectPanel()
         } else {
-          root.backendError = payload.error ? String(payload.error.message || "Backend unavailable") : "Backend unavailable"
+          root.backendError = payload.error
+            ? String(payload.error.message || "Backend unavailable") : "Backend unavailable"
         }
       } catch (error) {
         root.backendError = "Backend returned invalid data"
@@ -177,6 +164,12 @@ BarWidget {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
     }
+    onStatusChanged: {
+      if (status === Loader.Error) {
+        var detail = errorString && errorString() ? errorString() : "unknown QML error"
+        console.warn("Omakeyd panel failed to load:", detail)
+      }
+    }
   }
 
   IpcHandler {
@@ -187,10 +180,19 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
-    function next(): void { root.cycleFavorite(1) }
-    function previous(): void { root.cycleFavorite(-1) }
+    function next(): void { root.cycleLayout(1) }
+    function previous(): void { root.cycleLayout(-1) }
     function refresh(): void { root.refresh() }
+    function setup(): void { root.openSetup() }
+    function studio(): void { root.openStudio() }
     function status(): string { return JSON.stringify(root.snapshot) }
+    function panelStatus(): string {
+      return JSON.stringify({
+        loaderStatus: panelLoader.status,
+        hasItem: panelLoader.item !== null,
+        opened: root.opened
+      })
+    }
   }
 
   WidgetButton {
@@ -201,13 +203,13 @@ BarWidget {
     fontSize: Style.font.caption
     horizontalMargin: 7
     active: root.backendBusy
-    dimmed: root.backendReady && (root.backendError !== "" || root.currentKeyboard === null)
+    dimmed: root.backendReady && (root.backendError !== "" || root.currentProfile === null)
     tooltipText: root.indicatorTooltip
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) root.cycleFavorite(1)
-      else if (buttonCode === Qt.MiddleButton) root.cycleFavorite(-1)
+      if (buttonCode === Qt.RightButton) root.cycleLayout(1)
+      else if (buttonCode === Qt.MiddleButton) root.cycleLayout(-1)
       else root.togglePanel()
     }
-    onWheelMoved: function(delta) { root.cycleFavorite(delta < 0 ? 1 : -1) }
+    onWheelMoved: function(delta) { root.cycleLayout(delta < 0 ? 1 : -1) }
   }
 }

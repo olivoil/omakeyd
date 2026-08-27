@@ -1,16 +1,14 @@
 import QtQuick
 import Quickshell
-import Quickshell.Hyprland
 import Quickshell.Io
 
-// Reapplies only layouts the user has explicitly selected through Omakeyd.
-// It never edits Hyprland or keyd configuration files.
+// keyd owns persistent layout state in its root-owned profile. The service
+// keeps a lightweight diagnostic endpoint without replaying input mutations.
 Item {
   id: root
 
   property var shell: null
   property var manifest: null
-  property bool restorePending: false
   property string lastResult: ""
 
   readonly property string backendCommand: {
@@ -18,55 +16,34 @@ Item {
     return source ? source.replace(/\/$/, "") + "/bin/omakeyd" : "omakeyd"
   }
 
-  function restore() {
-    if (restoreProcess.running) {
-      restorePending = true
-      return
-    }
-    restorePending = false
-    restoreProcess.command = [backendCommand, "restore"]
-    restoreProcess.running = true
+  function refresh() {
+    if (statusProcess.running) return
+    statusProcess.command = [backendCommand, "restore"]
+    statusProcess.running = true
   }
 
-  Component.onCompleted: initialRestore.restart()
-
-  Connections {
-    target: Hyprland
-    function onRawEvent(event) {
-      if (!event || String(event.name || "") !== "configreloaded") return
-      // Let Hyprland finish rebuilding devices before restoring runtime choices.
-      reloadRestore.restart()
-    }
-  }
+  Component.onCompleted: initialRefresh.restart()
 
   Timer {
-    id: initialRestore
+    id: initialRefresh
     interval: 900
-    onTriggered: root.restore()
-  }
-
-  Timer {
-    id: reloadRestore
-    interval: 500
-    onTriggered: root.restore()
+    onTriggered: root.refresh()
   }
 
   Process {
-    id: restoreProcess
+    id: statusProcess
     stdout: StdioCollector {
-      id: restoreOutput
+      id: statusOutput
       waitForEnd: true
     }
-    onExited: function() {
-      root.lastResult = String(restoreOutput.text || "")
-      if (root.restorePending) Qt.callLater(root.restore)
-    }
+    onExited: root.lastResult = String(statusOutput.text || "")
   }
 
   IpcHandler {
     target: "io.github.olivoil.omakeyd.service"
 
-    function restore(): void { root.restore() }
+    function restore(): void { root.refresh() }
+    function refresh(): void { root.refresh() }
     function status(): string { return root.lastResult }
   }
 }

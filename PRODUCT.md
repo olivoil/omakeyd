@@ -6,34 +6,68 @@ product
 
 ## Users
 
-Omarchy users who type with Colemak-DH, Dvorak, language-specific XKB layouts, firmware-remapped keyboards, keyd, or a mixture of those. They open Omakeyd at a transition point, often just before a game or when moving between a laptop keyboard and an external board. They need to know which physical input path will change before they commit.
+Omarchy users who type with a positional English layout such as Colemak-DH,
+Dvorak, or a personal derivative and occasionally need the physical QWERTY
+arrangement again. The common transition is immediate and practical: entering a
+game, lending the computer to someone, troubleshooting, or returning to the
+everyday layout afterward.
+
+The primary user already relies on keyd for a built-in or otherwise
+non-programmable keyboard. Firmware-managed boards and keyboards not managed by
+keyd are secondary cases, not concepts the home panel must expose.
 
 ## Product Purpose
 
-Omakeyd is a native Omarchy Quattro keyboard-layout switcher. It discovers real typing keyboards, explains remapping layers such as keyd, lets people search the installed XKB catalogue, save useful layouts, create a layout from physical key rows, and apply a layout to one explicit keyboard.
+Omakeyd is a native Omarchy Quattro switcher and visual editor for keyd letter
+layouts. It keeps one keyboard's identity mapping (QWERTY) and the user's saved
+positional layouts one click away while leaving XKB on the ordinary US layout.
 
-Success means a user can move between their everyday layout and QWERTY in seconds without changing another keyboard, losing their Compose options, editing system files, or guessing whether a firmware or keyd remap sits underneath XKB.
+Success means a user can move between Colemak-DH and physical QWERTY in seconds,
+see the result in the shell bar, and return after a reboot without editing keyd
+configuration or authenticating on every switch.
+
+Omakeyd performs one authenticated setup per keyd profile. That setup creates a
+root-owned, Omakeyd-managed keyd layout and installs a narrowly constrained
+runtime helper. The helper may only replace the thirty primary-key bindings with
+a validated permutation; it cannot execute commands or rewrite arbitrary system
+configuration.
 
 ## Brand Personality
 
-Precise, calm, and candid. Omakeyd should feel like a small native instrument: quick enough for a habitual switch, explicit enough for a risky one, and honest about what the system can and cannot observe.
+Precise, calm, and candid. Omakeyd should feel like a small native instrument:
+quick enough for a habitual switch, explicit about the keyboard being changed,
+and quiet about implementation details that do not require attention.
 
 ## Anti-references
 
-- A global language flag that hides the target keyboard.
+- A language catalogue presented as the product's home screen.
 - A settings dashboard made from nested cards.
-- A layout picker that reports raw XKB names as if they were always the effective physical layout.
-- A privileged helper that rewrites `/etc/keyd` or asks for a password on every switch.
-- Decorative gamer styling, neon accents, glassmorphism, or animated keyboard theatrics.
+- Raw keyd, evdev, or XKB diagnostics in the everyday switching flow.
+- Granting the desktop session unrestricted access to keyd's privileged socket.
+- Requiring a password for every layout switch.
+- Decorative gamer styling, neon accents, glassmorphism, or animated keyboard
+  theatrics.
 
 ## Design Principles
 
-1. **Name the target before the action.** Every apply control names the keyboard it will affect.
-2. **Describe the whole mapping path.** Show physical source remaps, generated compensation, and active XKB separately when they differ.
-3. **Make the common reversal immediate.** Saved layouts such as Colemak-DH and QWERTY stay one click away.
-4. **Reveal complexity progressively.** Search and switching are primary; custom key rows and mapping diagnostics are available without crowding the default panel.
-5. **Fail closed.** An ambiguous virtual keyboard, invalid custom symbols, or disconnected target produces an explanation and no layout change.
+1. **Switch first.** The current keyd profile and saved layouts occupy the first
+   and only primary view.
+2. **QWERTY is the safe identity.** Physical QWERTY is always available and can
+   never be deleted.
+3. **Name the target before the action.** The profile label sits directly above
+   every layout choice.
+4. **Keep engines out of the task.** keyd setup and diagnostics are secondary;
+   XKB compensation does not appear in the keyd-managed path.
+5. **Make custom layouts spatial.** Editing happens on a visual keyboard, not in
+   rows of key names or XKB symbols.
+6. **Constrain privilege.** Setup is explicit and authenticated; routine
+   switching accepts only a complete permutation of the thirty primary keys.
+7. **Fail closed.** An invalid mapping, missing managed layer, unavailable keyd
+   daemon, or uncertain profile produces an explanation and no persisted state.
 
 ## Accessibility & Inclusion
 
-The panel must be fully keyboard-operable, retain visible focus, expose text in addition to color for every state, honor the live Omarchy theme, and avoid decorative motion. Labels must remain understandable for users who do not know XKB terminology; exact identifiers remain available as supporting detail.
+The panel and editor must be fully keyboard-operable, retain visible focus,
+expose text in addition to color for every state, honor the live Omarchy theme,
+and avoid decorative motion. Key labels use familiar printable characters;
+exact keyd identifiers remain available only in diagnostics.

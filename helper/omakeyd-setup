@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""Authenticated one-time migration for a simple keyd profile."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+KEYD_DIR = Path("/etc/keyd")
+RUNTIME_DIR = Path("/run/omakeyd")
+RUNTIME_TARGET = Path("/usr/local/libexec/omakeyd-helper")
+POLICY_TARGET = Path("/usr/share/polkit-1/actions/io.github.olivoil.omakeyd.policy")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+SECTION_RE = re.compile(r"^\s*\[([^\]]+)]\s*(?:#.*)?$")
+MANAGED_BEGIN = "# >>> OMAKEYD MANAGED LAYOUT >>>"
+MANAGED_END = "# <<< OMAKEYD MANAGED LAYOUT <<<"
+ROWS = (
+    ("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+    ("a", "s", "d", "f", "g", "h", "j", "k", "l", "semicolon"),
+    ("z", "x", "c", "v", "b", "n", "m", "comma", "dot", "slash"),
+)
+KEYS = tuple(key for row in ROWS for key in row)
+KEY_SET = frozenset(KEYS)
+ALIASES = {";": "semicolon", ",": "comma", ".": "dot", "/": "slash"}
+
+
+class SetupError(RuntimeError):
+    pass
+
+
+def emit(payload: dict[str, object], status: int = 0) -> int:
+    print(json.dumps(payload, separators=(",", ":")))
+    return status
+
+
+def fail(message: str, detail: str = "") -> int:
+    error: dict[str, str] = {"code": "setup-failed", "message": message}
+    if detail:
+        error["detail"] = detail
+    return emit({"ok": False, "error": error}, 1)
+
+
+def managed_layer(profile: str) -> str:
+    safe = re.sub(r"[^a-z0-9_]", "_", profile.lower().replace("-", "_"))
+    return f"omakeyd_{safe}"[:63]
+
+
+def acquire_lock() -> int:
+    RUNTIME_DIR.mkdir(mode=0o700, exist_ok=True)
+    metadata = RUNTIME_DIR.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0:
+        raise SetupError("The Omakeyd runtime directory is unsafe.")
+    os.chmod(RUNTIME_DIR, 0o700)
+    descriptor = os.open(
+        RUNTIME_DIR / "keyd-profile.lock",
+        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+        0o600,
+    )
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    return descriptor
+
+
+def normalize_key(value: str) -> str:
+    key = value.strip().lower()
+    return ALIASES.get(key, key)
+
+
+def profile_file(profile: str) -> tuple[Path, os.stat_result, str]:
+    if not PROFILE_RE.fullmatch(profile):
+        raise SetupError("Invalid keyd profile identifier.")
+    path = KEYD_DIR / f"{profile}.conf"
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise SetupError(f"Cannot inspect {path}: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SetupError("The keyd profile must be a regular, non-symlink file.")
+    if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise SetupError("The keyd profile must be root-owned and not writable by group or others.")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SetupError(f"Cannot read {path}: {error}") from error
+    if not re.search(r"(?m)^\s*\[ids]\s*$", text):
+        raise SetupError("The selected file is not a keyd device profile.")
+    return path, metadata, text
+
+
+def parse_sections(text: str) -> dict[str, dict[str, str]]:
+    sections: dict[str, dict[str, str]] = {}
+    current = ""
+    for raw_line in text.splitlines():
+        header = SECTION_RE.fullmatch(raw_line.strip())
+        if header:
+            current = header.group(1).strip().lower()
+            sections.setdefault(current, {})
+            continue
+        clean = raw_line.split("#", 1)[0].strip()
+        if not clean or "=" not in clean:
+            continue
+        source, target = (part.strip() for part in clean.split("=", 1))
+        sections.setdefault(current, {})[source.lower()] = target
+    return sections
+
+
+def effective_main_rows(sections: dict[str, dict[str, str]]) -> list[str]:
+    mapping = {key: key for key in KEYS}
+    for source, target in sections.get("main", {}).items():
+        source_key = normalize_key(source)
+        target_text = target.split("#", 1)[0].strip()
+        if any(character in target_text for character in "(),+") or " " in target_text:
+            continue
+        target_key = normalize_key(target_text)
+        if source_key in KEY_SET and target_key in KEY_SET:
+            mapping[source_key] = target_key
+    values = [mapping[key] for key in KEYS]
+    if len(set(values)) != 30:
+        raise SetupError(
+            "The current primary-key mapping is not one-to-one, so Omakeyd cannot preserve it safely."
+        )
+    return values
+
+
+def set_default_layout(text: str, layer: str) -> str:
+    lines = text.splitlines()
+    global_start = -1
+    global_end = len(lines)
+    for index, line in enumerate(lines):
+        header = SECTION_RE.fullmatch(line.strip())
+        if not header:
+            continue
+        if global_start >= 0:
+            global_end = index
+            break
+        if header.group(1).strip().lower() == "global":
+            global_start = index
+    assignment = f"default_layout = {layer}"
+    if global_start < 0:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(["[global]", assignment])
+        return "\n".join(lines) + "\n"
+    replaced = False
+    for index in range(global_start + 1, global_end):
+        if re.match(r"^\s*default_layout\s*=", lines[index]):
+            lines[index] = assignment
+            replaced = True
+            break
+    if not replaced:
+        lines.insert(global_start + 1, assignment)
+    return "\n".join(lines) + "\n"
+
+
+def managed_block(layer: str, values: list[str]) -> str:
+    lines = [MANAGED_BEGIN, f"[{layer}:layout]"]
+    lines.extend(f"{source} = {target}" for source, target in zip(KEYS, values))
+    lines.append(MANAGED_END)
+    return "\n".join(lines)
+
+
+def migrated_text(profile: str, text: str) -> tuple[str, str]:
+    if MANAGED_BEGIN in text or MANAGED_END in text:
+        raise SetupError("This profile already contains Omakeyd markers; no automatic rewrite was attempted.")
+    if "setlayout(" in text.lower():
+        raise SetupError(
+            "This profile already switches named keyd layouts and needs a manual migration."
+        )
+    sections = parse_sections(text)
+    current_default = sections.get("global", {}).get("default_layout", "main").strip().lower()
+    if current_default not in ("", "main"):
+        raise SetupError(
+            f"This profile already uses the {current_default!r} default layout and needs a manual migration."
+        )
+    values = effective_main_rows(sections)
+    layer = managed_layer(profile)
+    updated = set_default_layout(text, layer)
+    if updated and not updated.endswith("\n\n"):
+        updated += "\n"
+    updated += managed_block(layer, values) + "\n"
+    return updated, layer
+
+
+def stage(path: Path, metadata: os.stat_result, text: str) -> Path:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.omakeyd-", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+        os.fchown(descriptor, metadata.st_uid, metadata.st_gid)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return temporary
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def run_keyd(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["/usr/bin/keyd", *command],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SetupError(f"Could not run keyd: {error}") from error
+
+
+def systemctl(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["/usr/bin/systemctl", *command, "keyd.service"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SetupError(f"Could not control the keyd service: {error}") from error
+
+
+def service_active() -> bool:
+    return systemctl(["is-active", "--quiet"]).returncode == 0
+
+
+def restart_keyd(stability_seconds: float = 5.0) -> None:
+    result = systemctl(["restart"])
+    if result.returncode != 0:
+        raise SetupError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "The keyd service did not restart."
+        )
+
+    deadline = time.monotonic() + stability_seconds
+    while time.monotonic() < deadline:
+        if not service_active():
+            raise SetupError("The keyd service stopped after restarting.")
+        time.sleep(0.25)
+    if not service_active():
+        raise SetupError("The keyd service stopped after restarting.")
+
+
+def install_file(source: Path, destination: Path, mode: int) -> None:
+    if not source.is_file() or source.is_symlink():
+        raise SetupError(f"Installation asset is missing or unsafe: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    data = source.read_bytes()
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chown(temporary, 0, 0)
+        os.chmod(temporary, mode)
+        os.replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def backup_path(path: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{path.name}.omakeyd-backup-{timestamp}")
+    suffix = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.omakeyd-backup-{timestamp}-{suffix}")
+        suffix += 1
+    return candidate
+
+
+def setup(profile: str) -> dict[str, object]:
+    path, metadata, original = profile_file(profile)
+    updated, layer = migrated_text(profile, original)
+    temporary = stage(path, metadata, updated)
+    try:
+        check = run_keyd(["check", str(temporary)])
+        if check.returncode != 0:
+            raise SetupError(check.stderr.strip() or check.stdout.strip() or "keyd rejected the staged profile.")
+
+        assets = Path(__file__).resolve().parent
+        install_file(assets / "omakeyd-helper", RUNTIME_TARGET, 0o755)
+        install_file(assets / "io.github.olivoil.omakeyd.policy", POLICY_TARGET, 0o644)
+
+        backup = backup_path(path)
+        shutil.copy2(path, backup, follow_symlinks=False)
+        os.chown(backup, metadata.st_uid, metadata.st_gid)
+        os.chmod(backup, stat.S_IMODE(metadata.st_mode))
+
+        os.replace(temporary, path)
+        try:
+            restart_keyd()
+        except SetupError as activation_error:
+            rollback = stage(path, metadata, original)
+            os.replace(rollback, path)
+            try:
+                restart_keyd()
+            except SetupError as rollback_error:
+                raise SetupError(
+                    f"{activation_error} The original profile was restored on disk, "
+                    f"but keyd could not be restarted: {rollback_error}"
+                ) from activation_error
+            raise SetupError(
+                f"{activation_error} The original profile was restored and keyd was restarted."
+            ) from activation_error
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "ok": True,
+        "profile": profile,
+        "managedLayer": layer,
+        "backup": str(backup),
+        "helper": str(RUNTIME_TARGET),
+    }
+
+
+def install_only(profile: str) -> dict[str, object]:
+    _, _, text = profile_file(profile)
+    layer = managed_layer(profile)
+    if text.count(MANAGED_BEGIN) != 1 or text.count(MANAGED_END) != 1:
+        raise SetupError("The profile does not contain exactly one Omakeyd-managed layer.")
+    sections = parse_sections(text)
+    default_layout = sections.get("global", {}).get("default_layout", "").strip().lower()
+    if default_layout != layer or f"[{layer}:layout]" not in text:
+        raise SetupError("The profile's managed layer is incomplete or is not the default layout.")
+    assets = Path(__file__).resolve().parent
+    install_file(assets / "omakeyd-helper", RUNTIME_TARGET, 0o755)
+    install_file(assets / "io.github.olivoil.omakeyd.policy", POLICY_TARGET, 0o644)
+    return {
+        "ok": True,
+        "profile": profile,
+        "managedLayer": layer,
+        "helper": str(RUNTIME_TARGET),
+        "profileChanged": False,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="omakeyd-setup")
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--install-only", action="store_true")
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        return fail("Omakeyd setup must run through pkexec.")
+    lock_descriptor = -1
+    try:
+        lock_descriptor = acquire_lock()
+        return emit(install_only(args.profile) if args.install_only else setup(args.profile))
+    except SetupError as error:
+        return fail("The keyd profile was not changed.", str(error))
+    except Exception as error:
+        return fail("The keyd profile was not changed.", str(error))
+    finally:
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

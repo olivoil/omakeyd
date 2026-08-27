@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,109 +14,7 @@ from unittest.mock import patch
 from omakeyd import core
 
 
-def compiled_rows(rows: tuple[tuple[str, ...], ...]) -> str:
-    lines = ["xkb_keymap {", "xkb_symbols {" ]
-    for codes, values in zip(core.ROW_CODES, rows):
-        for code, value in zip(codes, values):
-            upper = value.upper() if len(value) == 1 and value.isalpha() else core.SHIFTED_KEYSYM.get(value, value)
-            lines.append(f"  key <{code}> {{ [ {value}, {upper} ] }};")
-    lines.extend(["};", "};", ""])
-    return "\n".join(lines)
-
-
-COLEMAK_DH_YOGA_ROWS = (
-    ("q", "w", "f", "p", "b", "j", "l", "u", "y", "semicolon"),
-    ("a", "r", "s", "t", "g", "m", "n", "e", "i", "o"),
-    ("z", "x", "c", "d", "v", "k", "h", "comma", "period", "slash"),
-)
-
-
-XKB_LIST = """layouts:
-- layout: 'us'
-  variant: ''
-  brief: 'en'
-  description: English (US)
-- layout: 'us'
-  variant: 'colemak_dh'
-  brief: 'en'
-  description: English (Colemak-DH)
-- layout: 'fr'
-  variant: ''
-  brief: 'fr'
-  description: French
-"""
-
-
-class FakeRunner:
-    def __init__(self, keyboards: list[dict] | None = None) -> None:
-        self.commands: list[list[str]] = []
-        self.keyboards = keyboards or [
-            {
-                "name": "keyd-virtual-keyboard",
-                "main": True,
-                "layout": "us",
-                "active_keymap": "English (US)",
-            },
-            {
-                "name": "power-button",
-                "main": False,
-                "layout": "us",
-                "active_keymap": "English (US)",
-            },
-        ]
-
-    def __call__(self, command):
-        command = list(command)
-        self.commands.append(command)
-        if command[:3] == ["xkbcli", "list", "--load-exotic"]:
-            return core.CommandResult(0, XKB_LIST, "")
-        if command[:2] == ["xkbcli", "compile-keymap"]:
-            layout = command[command.index("--layout") + 1]
-            variant = command[command.index("--variant") + 1] if "--variant" in command else ""
-            if layout in ("colemak_dh_yoga",) or (layout == "us" and variant == "colemak_dh"):
-                return core.CommandResult(0, compiled_rows(COLEMAK_DH_YOGA_ROWS), "")
-            return core.CommandResult(0, compiled_rows(core.QWERTY_ROWS), "")
-        if command[0] == "hyprctl" and "devices" in command:
-            return core.CommandResult(0, json.dumps({"keyboards": self.keyboards}), "")
-        if command[0] == "hyprctl" and "keyword" in command:
-            return core.CommandResult(0, "ok\n", "")
-        return core.CommandResult(1, "", f"Unexpected command: {command}")
-
-
-class OmakeydCoreTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.environment = patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "config")})
-        self.environment.start()
-
-    def tearDown(self) -> None:
-        self.environment.stop()
-        self.temporary.cleanup()
-
-    def write_keyd(self, content: str) -> Path:
-        directory = self.root / "keyd"
-        directory.mkdir(parents=True)
-        path = directory / "laptop-colemak-dh.conf"
-        path.write_text(content, encoding="utf-8")
-        return path
-
-    def test_parses_xkb_catalogue(self) -> None:
-        entries = core.parse_xkbcli_list(XKB_LIST)
-        self.assertEqual(entries[0]["layout"], "us")
-        self.assertEqual(entries[0]["variant"], "")
-        self.assertEqual(entries[1]["name"], "English (Colemak-DH)")
-        self.assertEqual(entries[2]["brief"], "fr")
-
-    def test_search_matches_name_layout_and_variant(self) -> None:
-        entries = core.parse_xkbcli_list(XKB_LIST)
-        self.assertEqual(core.search_catalog(entries, "colemak")[0]["variant"], "colemak_dh")
-        self.assertEqual(core.search_catalog(entries, "fr")[0]["layout"], "fr")
-        self.assertEqual(core.search_catalog(entries, "missing"), [])
-
-    def test_parses_the_current_keyd_mapping_as_physical_rows(self) -> None:
-        path = self.write_keyd(
-            """[ids]
+YOGA_MAIN = """[ids]
 # AT Translated Set 2 keyboard (the built-in laptop keyboard).
 0001:0001:09b4e68d
 
@@ -138,141 +40,297 @@ b = v
 n = k
 m = h
 """
+
+
+class FakeRunner:
+    def __init__(self, returncode: int = 0, stdout: str = '{"ok":true}\n', stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.commands: list[list[str]] = []
+
+    def __call__(self, command):
+        self.commands.append(list(command))
+        return core.CommandResult(self.returncode, self.stdout, self.stderr)
+
+
+def load_script(name: str, path: Path):
+    loader = SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class OmakeydCoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.keyd = self.root / "keyd"
+        self.keyd.mkdir()
+        self.config = self.root / "config.json"
+        self.runtime_helper = self.root / "omakeyd-helper"
+        self.runtime_helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.runtime_helper.chmod(0o755)
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "OMAKEYD_CONFIG": str(self.config),
+                "OMAKEYD_KEYD_DIR": str(self.keyd),
+                "OMAKEYD_HELPER": str(self.runtime_helper),
+                "OMAKEYD_PKEXEC": "/usr/bin/pkexec",
+            },
         )
-        source = core.parse_keyd_config(path)
-        self.assertIsNotNone(source)
-        self.assertEqual(source["alias"], "Built-in keyboard")
-        self.assertEqual(core.source_rows(source), [list(row) for row in COLEMAK_DH_YOGA_ROWS])
-        self.assertEqual(source["mappings"]["AD03"], "AC04")  # physical E emits F
-        self.assertEqual(source["mappings"]["AB07"], "AC06")  # physical M emits H
+        self.environment.start()
 
-    def test_matches_keyd_source_to_custom_yoga_layout(self) -> None:
-        path = self.write_keyd("[ids]\n*\n[main]\ne=f\nr=p\nt=b\ny=j\nu=l\ni=u\no=y\np=;\ns=r\nd=s\nf=t\nh=m\nj=n\nk=e\nl=i\n;=o\nv=d\nb=v\nn=k\nm=h\n")
-        source = core.parse_keyd_config(path)
-        runner = FakeRunner()
-        matched = core.match_source_to_layout(
-            source,
-            [
-                {
-                    "layout": "colemak_dh_yoga",
-                    "variant": "",
-                    "name": "English (Colemak-DH Yoga)",
-                    "brief": "DH",
-                    "source": "custom",
-                }
-            ],
-            runner,
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def write_profile(self, content: str = YOGA_MAIN) -> Path:
+        path = self.keyd / "laptop-colemak-dh.conf"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def managed_profile(self, rows=core.COLEMAK_DH_YOGA_ROWS) -> str:
+        values = core.normalized_flat_rows(rows)
+        layer = "omakeyd_laptop_colemak_dh"
+        bindings = "\n".join(
+            f"{source} = {target}"
+            for source, target in zip(core.PRIMARY_KEYS, values)
         )
-        self.assertEqual(matched["layout"], "colemak_dh_yoga")
-
-    def test_compensation_inverts_source_positions_for_qwerty(self) -> None:
-        source = {
-            "name": "Colemak-DH Yoga",
-            "mappings": {"AD03": "AC04", "AC04": "AD05"},
-        }
-        content = core.compensation_content(
-            source,
-            "us",
-            "",
-            "QWERTY (US)",
-            compiled_rows(core.QWERTY_ROWS),
+        return (
+            YOGA_MAIN
+            + f"\n[global]\ndefault_layout = {layer}\n\n"
+            + core.MANAGED_BEGIN
+            + f"\n[{layer}:layout]\n{bindings}\n"
+            + core.MANAGED_END
+            + "\n"
         )
-        self.assertIn('include "us"', content)
-        self.assertIn("key <AC04> { [ e, E ] };", content)
-        self.assertIn("key <AD05> { [ f, F ] };", content)
-        self.assertIn("corrected for Colemak-DH Yoga", content)
 
-    def test_compensation_rejects_colliding_source_map(self) -> None:
-        source = {"name": "Broken", "mappings": {"AD03": "AC04", "AD04": "AC04"}}
-        with self.assertRaisesRegex(core.OmakeydError, "same position"):
-            core.compensation_content(
-                source, "us", "", "QWERTY", compiled_rows(core.QWERTY_ROWS)
-            )
+    def test_detects_the_existing_yoga_keyd_mapping(self) -> None:
+        profile = core.parse_keyd_profile(self.write_profile())
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["label"], "Built-in keyboard")
+        self.assertEqual(profile["baseRows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
+        self.assertEqual(profile["currentRows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
+        self.assertFalse(profile["ready"])
 
-    def test_snapshot_filters_auxiliary_and_shadowed_devices(self) -> None:
-        keyd_path = self.write_keyd("[ids]\n*\n[main]\ne=f\n")
-        runner = FakeRunner(
-            [
-                {"name": "power-button", "main": False, "layout": "us", "active_keymap": "English (US)"},
-                {"name": "at-translated-set-2-keyboard", "main": False, "layout": "colemak_dh_yoga", "active_keymap": "English (Colemak-DH Yoga)"},
-                {"name": "keyd-virtual-keyboard", "main": True, "layout": "us", "active_keymap": "English (US)"},
-                {"name": "logitech-pro-x", "main": False, "layout": "us", "active_keymap": "English (US)"},
-            ]
+    def test_snapshot_is_profile_first_and_has_no_hyprland_devices(self) -> None:
+        self.write_profile()
+        payload = core.snapshot(path=self.config, keyd_dir=self.keyd)
+        self.assertEqual(payload["selectedProfile"], "laptop-colemak-dh")
+        self.assertEqual([item["id"] for item in payload["profiles"]], ["laptop-colemak-dh"])
+        self.assertEqual(
+            [item["id"] for item in payload["layouts"]],
+            ["qwerty", "colemak-dh-yoga"],
         )
-        config_file = self.root / "omakeyd.json"
-        payload = core.snapshot("", 10, runner, config_file, keyd_path.parent)
-        self.assertEqual([item["name"] for item in payload["keyboards"]], ["keyd-virtual-keyboard", "logitech-pro-x"])
-        ignored = {item["name"]: item["reason"] for item in payload["ignoredKeyboards"]}
-        self.assertEqual(ignored["power-button"], "auxiliary input")
-        self.assertEqual(ignored["at-translated-set-2-keyboard"], "underlying device managed by keyd")
+        self.assertNotIn("keyboards", payload)
+        self.assertNotIn("catalog", payload)
+        self.assertEqual(payload["profiles"][0]["currentLayoutId"], "colemak-dh-yoga")
 
-    def test_apply_generates_compensation_and_targets_only_selected_device(self) -> None:
-        runner = FakeRunner()
-        config_file = self.root / "omakeyd.json"
-        config = core.empty_config()
-        config["devices"]["keyd-virtual-keyboard"] = {
-            "source": {
-                "kind": "manual",
-                "name": "Colemak-DH",
-                "mappings": {"AD03": "AC04", "AC04": "AD05"},
-            }
-        }
-        core.save_config(config, config_file)
-        result = core.apply_layout(
-            "keyd-virtual-keyboard",
-            "us",
-            "",
-            "QWERTY (US)",
-            "US",
-            runner,
-            config_file,
-            self.root / "empty-keyd",
-        )
-        self.assertTrue(result["compensated"])
-        self.assertTrue(result["runtimeLayout"].startswith("omakeyd_comp_"))
-        generated = core.xkb_symbols_dir() / result["runtimeLayout"]
-        self.assertTrue(generated.exists())
-        keyword_commands = [command for command in runner.commands if "keyword" in command]
-        self.assertGreaterEqual(len(keyword_commands), 2)
-        self.assertTrue(all("keyd-virtual-keyboard" in " ".join(command) for command in keyword_commands))
-        saved = core.load_config(config_file)
-        self.assertEqual(saved["devices"]["keyd-virtual-keyboard"]["active"]["name"], "QWERTY (US)")
+    def test_managed_profile_is_ready_and_tracks_its_actual_rows(self) -> None:
+        self.write_profile(self.managed_profile(core.DISPLAY_ROWS))
+        payload = core.snapshot(path=self.config, keyd_dir=self.keyd)
+        profile = payload["profiles"][0]
+        self.assertTrue(profile["ready"])
+        self.assertTrue(profile["canApply"])
+        self.assertEqual(profile["currentLayoutId"], "qwerty")
+        self.assertEqual(profile["currentName"], "QWERTY (US)")
 
-    def test_custom_layout_uses_the_exact_yoga_rows(self) -> None:
-        runner = FakeRunner()
-        config_file = self.root / "omakeyd.json"
-        result = core.save_custom_layout(
+    def test_layout_must_be_a_complete_permutation(self) -> None:
+        rows = [list(row) for row in core.DISPLAY_ROWS]
+        rows[0][1] = "q"
+        with self.assertRaisesRegex(core.OmakeydError, "exactly once") as raised:
+            core.validate_rows(rows)
+        self.assertIn("Missing: w", raised.exception.detail)
+        self.assertIn("Repeated: q", raised.exception.detail)
+
+    def test_saves_visual_layout_rows_without_creating_xkb_files(self) -> None:
+        result = core.save_layout(
             "Colemak-DH Yoga Copy",
-            "DH",
-            "us",
-            "",
-            "q w f p b j l u y semicolon",
+            "dh",
+            "q w f p b j l u y ;",
             "a r s t g m n e i o",
-            "z x c d v k h comma period slash",
-            runner,
-            config_file,
+            "z x c d v k h , . /",
+            path=self.config,
         )
-        content = Path(result["path"]).read_text(encoding="utf-8")
-        self.assertIn("key <AD05> { [ b, B ] };", content)
-        self.assertIn("key <AC06> { [ m, M ] };", content)
-        self.assertIn("key <AB04> { [ d, D ] };", content)
-        self.assertIn("key <AB07> { [ h, H ] };", content)
-        self.assertIn(result["layout"]["layout"], core.load_config(config_file)["customLayouts"])
+        self.assertEqual(result["layout"]["brief"], "DH")
+        saved = core.load_config(self.config)["layouts"]["colemak-dh-yoga-copy"]
+        self.assertEqual(saved["rows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
+        self.assertEqual(list(self.root.glob("**/xkb/**")), [])
 
-    def test_custom_row_count_fails_before_writing(self) -> None:
+    def test_apply_calls_only_the_constrained_helper_and_persists_after_success(self) -> None:
+        self.write_profile(self.managed_profile())
         runner = FakeRunner()
-        with self.assertRaisesRegex(core.OmakeydError, "exactly 10"):
-            core.save_custom_layout(
-                "Short",
-                "S",
-                "us",
-                "",
-                "q w e",
-                "a s d f g h j k l semicolon",
-                "z x c v b n m comma period slash",
+        result = core.apply_layout(
+            "laptop-colemak-dh",
+            "qwerty",
+            runner,
+            self.config,
+            self.keyd,
+        )
+        self.assertEqual(result["layout"], "qwerty")
+        command = runner.commands[0]
+        self.assertEqual(command[:5], [
+            "/usr/bin/pkexec",
+            str(self.runtime_helper),
+            "apply",
+            "--profile",
+            "laptop-colemak-dh",
+        ])
+        self.assertEqual(command[5], "--rows")
+        self.assertEqual(len(command[6].split(",")), 30)
+        saved = core.load_config(self.config)
+        self.assertEqual(saved["profiles"]["laptop-colemak-dh"]["lastLayout"], "qwerty")
+
+    def test_failed_apply_does_not_persist_requested_layout(self) -> None:
+        self.write_profile(self.managed_profile())
+        runner = FakeRunner(1, '{"ok":false,"error":{"message":"no"}}\n')
+        with self.assertRaisesRegex(core.OmakeydError, "was not applied"):
+            core.apply_layout(
+                "laptop-colemak-dh",
+                "qwerty",
                 runner,
-                self.root / "config.json",
+                self.config,
+                self.keyd,
             )
+        saved = core.load_config(self.config)
+        self.assertNotIn("laptop-colemak-dh", saved["profiles"])
+
+    def test_ready_profile_can_reinstall_a_missing_runtime_helper(self) -> None:
+        self.write_profile(self.managed_profile())
+        self.runtime_helper.unlink()
+        state = core.snapshot(path=self.config, keyd_dir=self.keyd)
+        self.assertTrue(state["profiles"][0]["ready"])
+        self.assertTrue(state["profiles"][0]["needsSetup"])
+        runner = FakeRunner()
+        result = core.setup_profile(
+            "laptop-colemak-dh",
+            runner,
+            self.config,
+        )
+        self.assertIn("Reinstalled", result["message"])
+        self.assertIn("--install-only", runner.commands[0])
+
+    def test_v1_configuration_migrates_custom_rows(self) -> None:
+        old = {
+            "version": 1,
+            "selectedDevice": "keyd-virtual-keyboard",
+            "favorites": [],
+            "devices": {},
+            "customLayouts": {
+                "my_layout": {
+                    "name": "My layout",
+                    "brief": "MY",
+                    "rows": [list(row) for row in core.DISPLAY_ROWS],
+                }
+            },
+        }
+        self.config.write_text(json.dumps(old), encoding="utf-8")
+        migrated = core.load_config(self.config)
+        self.assertEqual(migrated["version"], 2)
+        self.assertIn("my-layout", migrated["layouts"])
+        self.assertEqual(json.loads(self.config.read_text())["version"], 2)
+
+    def test_setup_transform_preserves_current_mapping_in_managed_layer(self) -> None:
+        setup_module = load_script("omakeyd_setup", core.PLUGIN_ROOT / "helper" / "omakeyd-setup")
+        migrated, layer = setup_module.migrated_text("laptop-colemak-dh", YOGA_MAIN)
+        path = self.write_profile(migrated)
+        profile = core.parse_keyd_profile(path)
+        self.assertEqual(layer, "omakeyd_laptop_colemak_dh")
+        self.assertTrue(profile["ready"])
+        self.assertEqual(profile["currentRows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
+
+    @unittest.skipUnless(shutil.which("keyd"), "keyd is not installed")
+    def test_setup_transform_passes_the_installed_keyd_parser(self) -> None:
+        setup_module = load_script("omakeyd_setup_keyd_check", core.PLUGIN_ROOT / "helper" / "omakeyd-setup")
+        migrated, _ = setup_module.migrated_text("laptop-colemak-dh", YOGA_MAIN)
+        staged = self.root / "staged.conf"
+        staged.write_text(migrated, encoding="utf-8")
+        result = subprocess.run(
+            ["keyd", "check", str(staged)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    def test_setup_refuses_an_existing_layout_switcher(self) -> None:
+        setup_module = load_script("omakeyd_setup_refusal", core.PLUGIN_ROOT / "helper" / "omakeyd-setup")
+        with self.assertRaisesRegex(setup_module.SetupError, "manual migration"):
+            setup_module.migrated_text(
+                "complex",
+                "[ids]\n*\n[main]\ncapslock = setlayout(dvorak)\n[dvorak:layout]\na=b\n",
+            )
+
+    def test_runtime_helper_replaces_only_the_marked_block(self) -> None:
+        helper_module = load_script("omakeyd_runtime_helper", core.PLUGIN_ROOT / "helper" / "omakeyd-helper")
+        original = self.managed_profile()
+        qwerty = list(core.PRIMARY_KEYS)
+        updated = helper_module.replaced_text(
+            original,
+            "omakeyd_laptop_colemak_dh",
+            qwerty,
+        )
+        self.assertEqual(updated.split(core.MANAGED_BEGIN)[0], original.split(core.MANAGED_BEGIN)[0])
+        self.assertIn("e = e", updated.split(core.MANAGED_BEGIN)[1])
+        self.assertIn("[main]\ne = f", updated)
+        with self.assertRaisesRegex(helper_module.HelperError, "complete"):
+            helper_module.parse_rows("q,w,e")
+
+    def test_runtime_helper_restarts_and_checks_keyd(self) -> None:
+        helper_module = load_script("omakeyd_runtime_restart", core.PLUGIN_ROOT / "helper" / "omakeyd-helper")
+        calls = []
+
+        def fake_systemctl(command):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch.object(helper_module, "systemctl", side_effect=fake_systemctl):
+            helper_module.restart_keyd(stability_seconds=0)
+
+        self.assertEqual(calls, [["restart"], ["is-active", "--quiet"]])
+
+    def test_snapshot_does_not_claim_a_layout_is_active_when_keyd_is_down(self) -> None:
+        self.write_profile(self.managed_profile(core.DISPLAY_ROWS))
+        payload = core.snapshot(path=self.config, keyd_dir=self.keyd, keyd_active=False)
+        profile = payload["profiles"][0]
+        self.assertFalse(payload["keydActive"])
+        self.assertEqual(profile["configuredLayoutId"], "qwerty")
+        self.assertEqual(profile["currentLayoutId"], "")
+        self.assertEqual(profile["currentName"], "keyd is not running")
+
+    def test_latest_keyd_crash_uses_only_a_keyd_core(self) -> None:
+        runner = FakeRunner(
+            stdout='[{"pid":1071,"sig":11,"exe":"/usr/bin/keyd"}]\n'
+        )
+        crash = core._latest_keyd_crash(runner)
+        self.assertEqual(crash, {
+            "pid": 1071,
+            "process": "keyd",
+            "executable": "/usr/bin/keyd",
+            "signal": "SIGSEGV",
+        })
+
+    @unittest.skipUnless(shutil.which("keyd"), "keyd is not installed")
+    def test_runtime_qwerty_block_passes_the_installed_keyd_parser(self) -> None:
+        helper_module = load_script("omakeyd_runtime_keyd_check", core.PLUGIN_ROOT / "helper" / "omakeyd-helper")
+        updated = helper_module.replaced_text(
+            self.managed_profile(),
+            "omakeyd_laptop_colemak_dh",
+            list(core.PRIMARY_KEYS),
+        )
+        staged = self.root / "runtime-qwerty.conf"
+        staged.write_text(updated, encoding="utf-8")
+        result = subprocess.run(
+            ["keyd", "check", str(staged)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
 
 if __name__ == "__main__":

@@ -1,37 +1,47 @@
-# Mapping pipeline
+# Mapping model
 
-For a direct keyboard, the desired layout is also the runtime XKB layout:
-
-```text
-physical position P → XKB target(P)
-```
-
-For a keyd or firmware-remapped keyboard, an earlier stage changes the emitted key position:
+Omakeyd treats a layout as a forward mapping from the 30 physical QWERTY
+positions to the 30 emitted key names:
 
 ```text
-physical position P → source(P) = E → XKB runtime(E)
+physical position P → active keyd layout(P) → emitted key
 ```
 
-Omakeyd wants the final symbol to equal `target(P)`, so it generates the runtime overrides:
+For physical QWERTY, the mapping is the identity:
 
 ```text
-runtime(source(P)) = target(P)
+physical E → keyd emits E
 ```
 
-Example from the Yoga mapping:
+For the Yoga Colemak-DH map:
 
 ```text
 physical E → keyd emits F
-QWERTY wants physical E → "e"
-generated XKB assigns emitted F → "e"
+physical R → keyd emits P
+physical M → keyd emits H
 ```
 
-This is an inverse-position compensation, not a second forward Colemak mapping.
+XKB remains `us` in both cases. There is no inverse compensation layer and no
+per-device Hyprland keymap mutation.
 
-## Mapping requirements
+## Layout invariant
 
-Source maps must be a one-to-one permutation of the thirty primary key positions. Duplicate emitted positions are rejected because an inverse would be ambiguous. Unlisted keyd positions pass through unchanged.
+Every supported layout is a permutation of exactly these keys:
 
-The generated XKB file includes the target layout first, preserving its punctuation, modifier, and higher-level behavior. It overrides only positions moved by the source map with the target symbols compiled for their original physical positions.
+```text
+q w e r t y u i o p
+a s d f g h j k l ;
+z x c v b n m , . /
+```
 
-Generated names are content-addressed from the source mapping plus target layout and variant. Reapplying the same combination reuses the same file.
+No key may be absent, repeated, or outside that set. This narrow model has three
+useful consequences:
+
+- QWERTY can always be reconstructed as a safe identity layout.
+- Assigning an already-used key in the visual editor can swap the two positions,
+  keeping every draft valid.
+- The privileged helper cannot express a macro, command, modifier action, or
+  arbitrary keyd binding.
+
+Modifiers, function keys, navigation layers, Compose behavior, and other keyd
+bindings remain in the user's existing profile and outside the managed block.
