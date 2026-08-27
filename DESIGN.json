@@ -18,7 +18,7 @@
   "components": [],
   "narrative": {
     "northStar": "The Keyboard Toggle",
-    "overview": "Omakeyd is a compact, theme-native Quattro instrument for switching the active letter layout of a keyd-managed keyboard. Setup, diagnostics, and authoring stay behind secondary actions.",
+    "overview": "Omakeyd is a compact, theme-native Quattro panel for switching the active layout of a physical keyboard. Details and layout authoring stay behind secondary actions.",
     "keyCharacteristics": [
       "Theme-native, compact, and textually explicit.",
       "One continuous panel hierarchy, not a dashboard of cards.",
@@ -33,12 +33,12 @@
       },
       {
         "name": "The One Signal Rule",
-        "body": "Accent identifies the active layout, visible focus, and the primary setup or save action. It is never decoration.",
+        "body": "Accent identifies the active layout, visible focus, and the primary save action. It is never decoration.",
         "section": "colors"
       },
       {
         "name": "The Human Name Rule",
-        "body": "Say Built-in keyboard and Colemak-DH before showing exact keyd identifiers.",
+        "body": "Say Built-in keyboard and Colemak-DH before showing exact device identifiers.",
         "section": "typography"
       },
       {
@@ -50,13 +50,13 @@
     "dos": [
       "Do keep QWERTY and the everyday layout one click away.",
       "Do show a keyboard icon in the shell bar even when status is unavailable.",
-      "Do state the selected keyd profile immediately above layout choices.",
+      "Do state the selected physical keyboard immediately above layout choices.",
       "Do reuse Quattro controls and dynamic theme tokens without private approximations."
     ],
     "donts": [
       "Don't put a language catalogue on the home panel.",
       "Don't show virtual-keyboard or XKB-pipeline diagnostics by default.",
-      "Don't grant the user unrestricted access to the keyd socket.",
+      "Don't request authentication or install a system helper.",
       "Don't ask users to type space-separated key names.",
       "Don't use decorative gamer styling, neon accents, glassmorphism, or animated keyboard theatrics."
     ]

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "io.github.olivoil.omakeyd",
   "name": "Omakeyd",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "Olivier Melcher",
-  "description": "Switch keyboard layouts with keyd from the Omarchy bar.",
+  "description": "Switch keyboard layouts from the Omarchy bar.",
   "license": "MIT",
   "kinds": [
     "service",
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omakeyd",
-    "description": "Switch keyboard layouts with keyd.",
+    "description": "Switch keyboard layouts.",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "right"

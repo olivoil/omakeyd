@@ -18,7 +18,7 @@ class PluginContractTests(unittest.TestCase):
         for entrypoint in manifest["entryPoints"].values():
             self.assertTrue((ROOT / entrypoint).is_file())
 
-    def test_qml_uses_the_keyd_profile_backend(self) -> None:
+    def test_qml_uses_the_keyboard_profile_backend(self) -> None:
         widget = (ROOT / "Omakeyd.qml").read_text(encoding="utf-8")
         panel = (ROOT / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn('Qt.resolvedUrl("bin/omakeyd")', widget)
@@ -40,16 +40,25 @@ class PluginContractTests(unittest.TestCase):
         backend = ROOT / "bin" / "omakeyd"
         self.assertTrue(backend.stat().st_mode & 0o111)
 
-    def test_privileged_helpers_are_explicit_and_executable(self) -> None:
-        for name in ("omakeyd-helper", "omakeyd-setup"):
-            helper = ROOT / "helper" / name
-            self.assertTrue(helper.is_file())
-            self.assertTrue(helper.stat().st_mode & 0o111)
-        policy = (ROOT / "helper" / "io.github.olivoil.omakeyd.policy").read_text(
-            encoding="utf-8"
+    def test_plugin_contains_no_privileged_execution_path(self) -> None:
+        sources = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8")
+            for path in ("Omakeyd.qml", "Panel.qml", "Service.qml", "omakeyd/core.py", "bin/omakeyd")
         )
-        self.assertIn("/usr/local/libexec/omakeyd-helper", policy)
-        self.assertIn("<allow_active>yes</allow_active>", policy)
+        self.assertNotIn("pkexec", sources)
+        self.assertNotIn("allow_active", sources)
+        self.assertNotIn("/usr/local/libexec", sources)
+        self.assertNotIn("/usr/share/polkit-1", sources)
+        for name in (
+            "omakeyd-helper",
+            "omakeyd-setup",
+            "io.github.olivoil.omakeyd.policy",
+        ):
+            self.assertFalse((ROOT / "helper" / name).exists())
+
+    def test_widget_marks_the_open_panel_as_active(self) -> None:
+        widget = (ROOT / "Omakeyd.qml").read_text(encoding="utf-8")
+        self.assertIn("active: root.opened || root.backendBusy", widget)
 
 
 if __name__ == "__main__":

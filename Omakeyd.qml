@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -30,12 +31,13 @@ BarWidget {
     + (currentProfile ? "  " + String(currentProfile.currentBrief || "KB") : "")
   readonly property string indicatorTooltip: {
     if (backendError) return "Omakeyd\n" + backendError
-    if (!currentProfile) return "Omakeyd\nNo keyd keyboard profile found"
+    if (snapshot.keydConflict === true)
+      return "Omakeyd\n" + String(snapshot.conflictMessage || "keyd is running")
+    if (!currentProfile) return "Omakeyd\nNo keyboard found"
     var lines = [
       String(currentProfile.currentName || "Unknown layout"),
       String(currentProfile.label || currentProfile.id)
     ]
-    if (!currentProfile.ready) lines.push("Setup required")
     return lines.join("\n")
   }
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -83,10 +85,6 @@ BarWidget {
       panelLoader.item.closeForPopoutSwitch()
   }
 
-  function openSetup() {
-    if (panelLoader.item && panelLoader.item.showSetup) panelLoader.item.showSetup()
-  }
-
   function openStudio() {
     if (panelLoader.item && panelLoader.item.showStudio) panelLoader.item.showStudio()
   }
@@ -119,6 +117,16 @@ BarWidget {
     id: refreshTimer
     interval: 300
     onTriggered: root.refresh()
+  }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (!event || !event.name) return
+      var name = String(event.name)
+      if (name === "activelayout" || name === "configreloaded")
+        refreshTimer.restart()
+    }
   }
 
   Timer {
@@ -190,7 +198,6 @@ BarWidget {
     function next(): void { root.cycleLayout(1) }
     function previous(): void { root.cycleLayout(-1) }
     function refresh(): void { root.refresh() }
-    function setup(): void { root.openSetup() }
     function studio(): void { root.openStudio() }
     function status(): string { return JSON.stringify(root.snapshot) }
     function panelStatus(): string {
@@ -209,8 +216,9 @@ BarWidget {
     text: root.indicatorText
     fontSize: Style.font.caption
     horizontalMargin: 7
-    active: root.backendBusy
-    dimmed: root.backendReady && (root.backendError !== "" || root.currentProfile === null)
+    active: root.opened || root.backendBusy
+    dimmed: root.backendReady && (root.backendError !== "" || root.currentProfile === null
+      || root.snapshot.keydConflict === true)
     tooltipText: root.indicatorTooltip
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.cycleLayout(1)

@@ -1,9 +1,10 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 
-// keyd owns persistent layout state in its root-owned profile. The service
-// keeps a lightweight diagnostic endpoint without replaying input mutations.
+// Per-device Hyprland settings are runtime state. Reapply the user's last
+// layout after the shell and compositor configuration have loaded.
 Item {
   id: root
 
@@ -23,11 +24,19 @@ Item {
   }
 
   Component.onCompleted: initialRefresh.restart()
+  Component.onDestruction: Quickshell.execDetached([backendCommand, "reset"])
 
   Timer {
     id: initialRefresh
     interval: 900
     onTriggered: root.refresh()
+  }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (event && event.name === "configreloaded") initialRefresh.restart()
+    }
   }
 
   Process {

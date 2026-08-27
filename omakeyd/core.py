@@ -6,53 +6,66 @@ import json
 import os
 import re
 import shlex
-import signal
-import shutil
 import subprocess
 import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Sequence
 
 
 APP_ID = "io.github.olivoil.omakeyd"
-SCHEMA_VERSION = 2
-PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+APP_VERSION = "0.3.0"
+SCHEMA_VERSION = 3
 
 DISPLAY_ROWS = (
     ("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
     ("a", "s", "d", "f", "g", "h", "j", "k", "l", ";"),
     ("z", "x", "c", "v", "b", "n", "m", ",", ".", "/"),
 )
-
-COLEMAK_DH_YOGA_ROWS = (
+COLEMAK_DH_ROWS = (
     ("q", "w", "f", "p", "b", "j", "l", "u", "y", ";"),
     ("a", "r", "s", "t", "g", "m", "n", "e", "i", "o"),
     ("z", "x", "c", "d", "v", "k", "h", ",", ".", "/"),
 )
+# Import-compatible alias for configurations and scripts written against 0.2.
+COLEMAK_DH_YOGA_ROWS = COLEMAK_DH_ROWS
 
+ROW_CODES = (
+    tuple(f"AD{index:02d}" for index in range(1, 11)),
+    tuple(f"AC{index:02d}" for index in range(1, 11)),
+    tuple(f"AB{index:02d}" for index in range(1, 11)),
+)
 KEY_ALIASES = {
     ";": "semicolon",
     ",": "comma",
-    ".": "dot",
+    ".": "period",
     "/": "slash",
+    "dot": "period",
 }
-DISPLAY_ALIASES = {value: key for key, value in KEY_ALIASES.items()}
-KEYD_ROWS = tuple(
-    tuple(KEY_ALIASES.get(key, key) for key in row) for row in DISPLAY_ROWS
-)
-PRIMARY_KEYS = tuple(key for row in KEYD_ROWS for key in row)
+DISPLAY_ALIASES = {
+    "semicolon": ";",
+    "comma": ",",
+    "period": ".",
+    "slash": "/",
+}
+SHIFTED_KEYSYM = {
+    "semicolon": "colon",
+    "comma": "less",
+    "period": "greater",
+    "slash": "question",
+}
+PRIMARY_KEYS = tuple(KEY_ALIASES.get(key, key) for row in DISPLAY_ROWS for key in row)
 PRIMARY_KEY_SET = frozenset(PRIMARY_KEYS)
-
-PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
+DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 LAYOUT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-SECTION_RE = re.compile(r"^\s*\[([^\]]+)]\s*(?:#.*)?$")
-MANAGED_BEGIN = "# >>> OMAKEYD MANAGED LAYOUT >>>"
-MANAGED_END = "# <<< OMAKEYD MANAGED LAYOUT <<<"
-DEFAULT_HELPER = Path("/usr/local/libexec/omakeyd-helper")
-DEFAULT_KEYD_DIR = Path("/etc/keyd")
+UNTYPED_RE = re.compile(
+    r"(?:^|[-_])(?:power-button|sleep-button|lid-switch|video-bus|"
+    r"consumer-control|system-control|extra-buttons?)(?:$|[-_])"
+)
+VIRTUAL_RE = re.compile(r"(?:^|[-_])virtual(?:$|[-_])")
+GENERATED_PREFIX = "omakeyd_"
 
 
 class OmakeydError(RuntimeError):
@@ -82,23 +95,14 @@ Runner = Callable[[Sequence[str]], CommandResult]
 def default_runner(command: Sequence[str]) -> CommandResult:
     try:
         completed = subprocess.run(
-            list(command),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
+            list(command), check=False, capture_output=True, text=True, timeout=20
         )
     except FileNotFoundError as error:
         raise OmakeydError(
-            "command-missing",
-            f"Required command is unavailable: {command[0]}",
-            str(error),
+            "command-missing", f"Required command is unavailable: {command[0]}", str(error)
         ) from error
     except subprocess.TimeoutExpired as error:
-        raise OmakeydError(
-            "command-timeout",
-            f"Timed out while running {command[0]}.",
-        ) from error
+        raise OmakeydError("command-timeout", f"Timed out while running {command[0]}.") from error
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -111,27 +115,13 @@ def config_path() -> Path:
     return Path(override) if override else config_home() / "omakeyd" / "config.json"
 
 
-def helper_path() -> Path:
-    override = os.environ.get("OMAKEYD_HELPER")
-    return Path(override) if override else DEFAULT_HELPER
-
-
-def setup_path() -> Path:
-    return PLUGIN_ROOT / "helper" / "omakeyd-setup"
-
-
-def keyd_directory() -> Path:
-    override = os.environ.get("OMAKEYD_KEYD_DIR")
-    return Path(override) if override else DEFAULT_KEYD_DIR
+def xkb_symbols_dir() -> Path:
+    override = os.environ.get("OMAKEYD_XKB_DIR")
+    return Path(override) if override else config_home() / "xkb" / "symbols"
 
 
 def empty_config() -> dict[str, Any]:
-    return {
-        "version": SCHEMA_VERSION,
-        "selectedProfile": "",
-        "profiles": {},
-        "layouts": {},
-    }
+    return {"version": SCHEMA_VERSION, "selectedProfile": "", "profiles": {}, "layouts": {}}
 
 
 def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -160,60 +150,6 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     atomic_write_text(target, json.dumps(serializable, indent=2, sort_keys=True) + "\n")
 
 
-def _migrate_v1(loaded: dict[str, Any]) -> dict[str, Any]:
-    migrated = empty_config()
-    custom = loaded.get("customLayouts", {})
-    if isinstance(custom, dict):
-        for identifier, definition in custom.items():
-            if not isinstance(definition, dict) or not isinstance(definition.get("rows"), list):
-                continue
-            try:
-                rows = validate_rows(definition["rows"])
-            except OmakeydError:
-                continue
-            layout_identifier = slugify(str(identifier))
-            migrated["layouts"][layout_identifier] = {
-                "id": layout_identifier,
-                "name": str(definition.get("name") or humanize_identifier(layout_identifier)),
-                "brief": str(definition.get("brief") or brief_for(str(definition.get("name", "")))),
-                "rows": rows,
-                "source": "custom",
-            }
-    return migrated
-
-
-def load_config(path: Path | None = None) -> dict[str, Any]:
-    target = path or config_path()
-    if not target.exists():
-        return empty_config()
-    try:
-        loaded = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise OmakeydError(
-            "config-invalid",
-            "Omakeyd could not read its configuration.",
-            str(error),
-        ) from error
-    if not isinstance(loaded, dict):
-        raise OmakeydError("config-invalid", "Omakeyd configuration is not an object.")
-    if loaded.get("version") == 1:
-        migrated = _migrate_v1(loaded)
-        save_config(migrated, target)
-        return migrated
-    if loaded.get("version") != SCHEMA_VERSION:
-        raise OmakeydError(
-            "config-version",
-            "Omakeyd configuration has an unsupported version.",
-        )
-    baseline = empty_config()
-    baseline["selectedProfile"] = str(loaded.get("selectedProfile", ""))
-    if isinstance(loaded.get("profiles"), dict):
-        baseline["profiles"] = loaded["profiles"]
-    if isinstance(loaded.get("layouts"), dict):
-        baseline["layouts"] = loaded["layouts"]
-    return baseline
-
-
 def normalize_key(value: Any) -> str:
     key = str(value).strip().lower()
     return KEY_ALIASES.get(key, key)
@@ -224,43 +160,26 @@ def display_key(value: Any) -> str:
     return DISPLAY_ALIASES.get(key, key)
 
 
-def _split_row(value: str, label: str) -> list[str]:
-    try:
-        tokens = shlex.split(str(value))
-    except ValueError as error:
-        raise OmakeydError("layout-row", f"{label} row could not be parsed.", str(error)) from error
-    if len(tokens) != 10:
-        raise OmakeydError(
-            "layout-row-count",
-            f"{label} row needs exactly 10 keys.",
-            f"Received {len(tokens)}.",
-        )
-    return tokens
-
-
 def validate_rows(rows: Sequence[Sequence[Any]]) -> list[list[str]]:
     if len(rows) != 3 or any(len(row) != 10 for row in rows):
-        raise OmakeydError(
-            "layout-shape",
-            "A layout needs three rows of ten keys.",
-        )
+        raise OmakeydError("layout-shape", "A layout needs three rows of ten keys.")
     normalized = [normalize_key(key) for row in rows for key in row]
     counts = Counter(normalized)
     missing = [display_key(key) for key in PRIMARY_KEYS if counts[key] == 0]
     duplicate = [display_key(key) for key, count in counts.items() if count > 1]
     unsupported = [display_key(key) for key in normalized if key not in PRIMARY_KEY_SET]
     if missing or duplicate or unsupported:
-        detail_parts = []
+        details = []
         if missing:
-            detail_parts.append("Missing: " + " ".join(missing))
+            details.append("Missing: " + " ".join(missing))
         if duplicate:
-            detail_parts.append("Repeated: " + " ".join(duplicate))
+            details.append("Repeated: " + " ".join(duplicate))
         if unsupported:
-            detail_parts.append("Unsupported: " + " ".join(unsupported))
+            details.append("Unsupported: " + " ".join(unsupported))
         raise OmakeydError(
             "layout-permutation",
             "Each primary key must appear exactly once.",
-            ". ".join(detail_parts),
+            ". ".join(details),
         )
     return [
         [display_key(key) for key in normalized[index : index + 10]]
@@ -268,31 +187,26 @@ def validate_rows(rows: Sequence[Sequence[Any]]) -> list[list[str]]:
     ]
 
 
+def _split_row(value: str, label: str) -> list[str]:
+    try:
+        tokens = shlex.split(str(value))
+    except ValueError as error:
+        raise OmakeydError("layout-row", f"{label} row could not be parsed.", str(error)) from error
+    if len(tokens) != 10:
+        raise OmakeydError(
+            "layout-row-count", f"{label} row needs exactly 10 keys.", f"Received {len(tokens)}."
+        )
+    return tokens
+
+
 def rows_from_strings(top: str, home: str, bottom: str) -> list[list[str]]:
     return validate_rows(
-        (
-            _split_row(top, "Top"),
-            _split_row(home, "Home"),
-            _split_row(bottom, "Bottom"),
-        )
+        (_split_row(top, "Top"), _split_row(home, "Home"), _split_row(bottom, "Bottom"))
     )
 
 
 def normalized_flat_rows(rows: Sequence[Sequence[Any]]) -> list[str]:
-    validated = validate_rows(rows)
-    return [normalize_key(key) for row in validated for key in row]
-
-
-def qwerty_layout() -> dict[str, Any]:
-    return {
-        "id": "qwerty",
-        "name": "QWERTY (US)",
-        "brief": "US",
-        "rows": [list(row) for row in DISPLAY_ROWS],
-        "source": "built-in",
-        "editable": False,
-        "removable": False,
-    }
+    return [normalize_key(key) for row in validate_rows(rows) for key in row]
 
 
 def slugify(value: str) -> str:
@@ -301,14 +215,23 @@ def slugify(value: str) -> str:
 
 
 def humanize_identifier(value: str) -> str:
+    known = {
+        "at-translated-set-2-keyboard": "Built-in keyboard",
+        "zsa-technology-labs-voyager": "ZSA Voyager",
+        "zsa-technology-labs-voyager-keyboard": "ZSA Voyager",
+    }
+    if value in known:
+        return known[value]
     words = re.sub(r"[-_]+", " ", value).strip().split()
-    rendered = " ".join(word.upper() if word.lower() in {"dh", "usb", "us"} else word.title() for word in words)
-    return rendered or value
+    return " ".join(
+        word.upper() if word.lower() in {"dh", "rgb", "usb", "us"} else word.title()
+        for word in words
+    ) or value
 
 
 def brief_for(name: str) -> str:
     lower = name.lower()
-    if "qwerty" in lower:
+    if "qwerty" in lower or name == "English (US)":
         return "US"
     if "colemak" in lower:
         return "DH" if "dh" in lower else "CM"
@@ -318,147 +241,107 @@ def brief_for(name: str) -> str:
     return (words[0] if words else "KB")[:3].upper()
 
 
-def managed_layer_name(profile_id: str) -> str:
-    safe = re.sub(r"[^a-z0-9_]", "_", profile_id.lower().replace("-", "_"))
-    return f"omakeyd_{safe}"[:63]
-
-
-def _simple_mapping(source: str, target: str) -> tuple[str, str] | None:
-    source_key = normalize_key(source)
-    target_text = target.strip().split("#", 1)[0].strip()
-    if any(character in target_text for character in "(),+") or " " in target_text:
-        return None
-    target_key = normalize_key(target_text)
-    if source_key not in PRIMARY_KEY_SET or target_key not in PRIMARY_KEY_SET:
-        return None
-    return source_key, target_key
-
-
-def _sections(text: str) -> tuple[dict[str, dict[str, str]], list[str]]:
-    sections: dict[str, dict[str, str]] = {}
-    ids: list[str] = []
-    current = ""
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        header = SECTION_RE.fullmatch(line)
-        if header:
-            current = header.group(1).split(":", 1)[0].strip().lower()
-            sections.setdefault(current, {})
-            continue
-        clean = raw_line.split("#", 1)[0].strip()
-        if not clean:
-            continue
-        if current == "ids":
-            ids.append(clean)
-            continue
-        if "=" not in clean:
-            continue
-        source, target = (part.strip() for part in clean.split("=", 1))
-        sections.setdefault(current, {})[source.lower()] = target
-    return sections, ids
-
-
-def _mapped_rows(*mappings: dict[str, str]) -> list[list[str]]:
-    effective = {key: key for key in PRIMARY_KEYS}
-    for mapping in mappings:
-        for source, target in mapping.items():
-            simple = _simple_mapping(source, target)
-            if simple:
-                effective[simple[0]] = simple[1]
+def _builtin_layouts() -> list[dict[str, Any]]:
     return [
-        [display_key(effective[key]) for key in row]
-        for row in KEYD_ROWS
+        {
+            "id": "qwerty",
+            "name": "QWERTY (US)",
+            "brief": "US",
+            "rows": [list(row) for row in DISPLAY_ROWS],
+            "source": "built-in",
+            "editable": False,
+            "removable": False,
+        },
+        {
+            "id": "colemak-dh",
+            "name": "Colemak-DH",
+            "brief": "DH",
+            "rows": [list(row) for row in COLEMAK_DH_ROWS],
+            "source": "built-in",
+            "editable": False,
+            "removable": False,
+        },
     ]
 
 
-def parse_keyd_profile(path: Path) -> dict[str, Any] | None:
+def _canonical_layout_id(value: Any) -> str:
+    identifier = str(value or "")
+    return "colemak-dh" if identifier == "colemak-dh-yoga" else identifier
+
+
+def _migrate_config(loaded: dict[str, Any]) -> dict[str, Any]:
+    migrated = empty_config()
+    version = loaded.get("version")
+    if version == 1:
+        migrated["selectedProfile"] = str(loaded.get("selectedDevice", ""))
+        custom = loaded.get("customLayouts", {})
+        if isinstance(custom, dict):
+            for identifier, definition in custom.items():
+                if not isinstance(definition, dict) or not isinstance(definition.get("rows"), list):
+                    continue
+                try:
+                    rows = validate_rows(definition["rows"])
+                except OmakeydError:
+                    continue
+                layout_id = slugify(str(identifier).removeprefix("omakeyd_"))
+                migrated["layouts"][layout_id] = {
+                    "id": layout_id,
+                    "name": str(definition.get("name") or humanize_identifier(layout_id)),
+                    "brief": str(definition.get("brief") or brief_for(layout_id)),
+                    "rows": rows,
+                    "source": "custom",
+                }
+        devices = loaded.get("devices", {})
+        if isinstance(devices, dict):
+            for device, state in devices.items():
+                if not isinstance(state, dict):
+                    continue
+                active = state.get("active", {})
+                if isinstance(active, dict):
+                    layout_id = _canonical_layout_id(active.get("id") or active.get("layout"))
+                    if layout_id in {"us", "qwerty-us"}:
+                        layout_id = "qwerty"
+                    if layout_id:
+                        migrated["profiles"][str(device)] = {"lastLayout": layout_id}
+        return migrated
+    if version == 2:
+        migrated["selectedProfile"] = str(loaded.get("selectedProfile", ""))
+        if isinstance(loaded.get("profiles"), dict):
+            for profile, state in loaded["profiles"].items():
+                if not isinstance(state, dict):
+                    continue
+                migrated["profiles"][str(profile)] = {
+                    "lastLayout": _canonical_layout_id(state.get("lastLayout"))
+                }
+        if isinstance(loaded.get("layouts"), dict):
+            migrated["layouts"] = loaded["layouts"]
+        return migrated
+    raise OmakeydError("config-version", "Omakeyd configuration has an unsupported version.")
+
+
+def load_config(path: Path | None = None) -> dict[str, Any]:
+    target = path or config_path()
+    if not target.exists():
+        return empty_config()
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    sections, ids = _sections(text)
-    if "ids" not in sections:
-        return None
-    profile_id = path.stem
-    if not PROFILE_RE.fullmatch(profile_id):
-        return None
-    global_section = sections.get("global", {})
-    default_layout = str(global_section.get("default_layout", "main")).strip().lower()
-    main = sections.get("main", {})
-    base_rows = _mapped_rows(main)
-    active_section = sections.get(default_layout, {}) if default_layout != "main" else {}
-    current_rows = _mapped_rows(main, active_section)
-    expected_layer = managed_layer_name(profile_id)
-    markers = MANAGED_BEGIN in text and MANAGED_END in text
-    ready = markers and default_layout == expected_layer and expected_layer in sections
-    if ready:
-        setup_reason = ""
-    elif markers:
-        setup_reason = "The managed keyd layer exists but is not the default layout."
-    elif "setlayout(" in text.lower():
-        setup_reason = "This profile already switches named keyd layouts and needs manual migration."
-    else:
-        setup_reason = "One-time setup is required before Omakeyd can switch this profile."
-    lower_stem = profile_id.lower()
-    label = "Built-in keyboard" if any(word in lower_stem for word in ("laptop", "builtin", "built-in")) else humanize_identifier(profile_id)
-    return {
-        "id": profile_id,
-        "label": label,
-        "configPath": str(path),
-        "ids": ids,
-        "managedLayer": expected_layer,
-        "defaultLayout": default_layout,
-        "ready": ready,
-        "setupReason": setup_reason,
-        "baseRows": base_rows,
-        "currentRows": current_rows,
-    }
-
-
-def discover_profiles(directory: Path | None = None) -> list[dict[str, Any]]:
-    root = directory or keyd_directory()
-    if not root.is_dir():
-        return []
-    profiles = []
-    for path in sorted(root.glob("*.conf")):
-        parsed = parse_keyd_profile(path)
-        if parsed:
-            profiles.append(parsed)
-    profiles.sort(key=lambda item: (item["label"] != "Built-in keyboard", item["label"].lower()))
-    return profiles
-
-
-def _rows_equal(left: Sequence[Sequence[Any]], right: Sequence[Sequence[Any]]) -> bool:
-    try:
-        return normalized_flat_rows(left) == normalized_flat_rows(right)
-    except OmakeydError:
-        return False
-
-
-def _detected_layout(rows: Sequence[Sequence[Any]], label: str) -> dict[str, Any]:
-    validated = validate_rows(rows)
-    if _rows_equal(validated, COLEMAK_DH_YOGA_ROWS):
-        return {
-            "id": "colemak-dh-yoga",
-            "name": "Colemak-DH",
-            "brief": "DH",
-            "rows": validated,
-            "source": "detected",
-            "editable": False,
-            "removable": False,
-        }
-    fingerprint = ",".join(normalized_flat_rows(validated))
-    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:8]
-    name = f"{label} layout"
-    return {
-        "id": f"detected-{digest}",
-        "name": name,
-        "brief": brief_for(name),
-        "rows": validated,
-        "source": "detected",
-        "editable": False,
-        "removable": False,
-    }
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise OmakeydError(
+            "config-invalid", "Omakeyd could not read its configuration.", str(error)
+        ) from error
+    if not isinstance(loaded, dict):
+        raise OmakeydError("config-invalid", "Omakeyd configuration is not an object.")
+    if loaded.get("version") != SCHEMA_VERSION:
+        migrated = _migrate_config(loaded)
+        save_config(migrated, target)
+        return migrated
+    baseline = empty_config()
+    baseline["selectedProfile"] = str(loaded.get("selectedProfile", ""))
+    if isinstance(loaded.get("profiles"), dict):
+        baseline["profiles"] = loaded["profiles"]
+    if isinstance(loaded.get("layouts"), dict):
+        baseline["layouts"] = loaded["layouts"]
+    return baseline
 
 
 def _stored_layouts(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -470,8 +353,8 @@ def _stored_layouts(config: dict[str, Any]) -> list[dict[str, Any]]:
             rows = validate_rows(raw.get("rows", []))
         except OmakeydError:
             continue
-        layout_id = str(raw.get("id") or identifier)
-        if not LAYOUT_ID_RE.fullmatch(layout_id) or layout_id == "qwerty":
+        layout_id = _canonical_layout_id(raw.get("id") or identifier)
+        if not LAYOUT_ID_RE.fullmatch(layout_id) or layout_id in {"qwerty", "colemak-dh"}:
             continue
         name = str(raw.get("name") or humanize_identifier(layout_id))
         layouts.append(
@@ -485,139 +368,11 @@ def _stored_layouts(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "removable": True,
             }
         )
-    return layouts
+    return sorted(layouts, key=lambda item: item["name"].lower())
 
 
-def all_layouts(config: dict[str, Any], profiles: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    layouts = [qwerty_layout(), *_stored_layouts(config)]
-    for profile in profiles:
-        for rows in (profile.get("baseRows", []), profile.get("currentRows", [])):
-            if not rows or _rows_equal(rows, DISPLAY_ROWS):
-                continue
-            detected = _detected_layout(rows, str(profile.get("label", "Detected")))
-            if not any(_rows_equal(item["rows"], detected["rows"]) for item in layouts):
-                layouts.append(detected)
-    layouts.sort(key=lambda item: (item["id"] != "qwerty", item["name"].lower()))
-    return layouts
-
-
-def _selected_profile(config: dict[str, Any], profiles: Sequence[dict[str, Any]]) -> str:
-    available = {str(profile["id"]) for profile in profiles}
-    selected = str(config.get("selectedProfile", ""))
-    if selected in available:
-        return selected
-    return str(profiles[0]["id"]) if profiles else ""
-
-
-def _resolve_pkexec() -> str | None:
-    return os.environ.get("OMAKEYD_PKEXEC") or shutil.which("pkexec")
-
-
-def _helper_status() -> dict[str, Any]:
-    runtime = helper_path()
-    setup = setup_path()
-    pkexec = _resolve_pkexec()
-    return {
-        "installed": runtime.is_file() and os.access(runtime, os.X_OK),
-        "path": str(runtime),
-        "setupAvailable": setup.is_file() and os.access(setup, os.X_OK) and bool(pkexec),
-        "setupPath": str(setup),
-        "pkexecAvailable": bool(pkexec),
-    }
-
-
-def _latest_keyd_crash(runner: Runner = default_runner) -> dict[str, Any] | None:
-    result = runner(["coredumpctl", "--json=short", "--no-pager", "list", "keyd"])
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    try:
-        records = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(records, list) or not records:
-        return None
-    record = records[-1]
-    if not isinstance(record, dict) or str(record.get("exe", "")) != "/usr/bin/keyd":
-        return None
-    try:
-        pid = int(record["pid"])
-        signal_number = int(record["sig"])
-        signal_name = signal.Signals(signal_number).name
-    except (KeyError, TypeError, ValueError):
-        return None
-    return {
-        "pid": pid,
-        "process": "keyd",
-        "executable": "/usr/bin/keyd",
-        "signal": signal_name,
-    }
-
-
-def _match_layout(rows: Sequence[Sequence[Any]], layouts: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    return next((layout for layout in layouts if _rows_equal(rows, layout["rows"])), None)
-
-
-def snapshot(
-    query: str = "",
-    limit: int = 60,
-    path: Path | None = None,
-    keyd_dir: Path | None = None,
-    keyd_active: bool | None = None,
-) -> dict[str, Any]:
-    config = load_config(path)
-    profiles = discover_profiles(keyd_dir)
-    layouts = all_layouts(config, profiles)
-    helper = _helper_status()
-    if keyd_active is None:
-        if keyd_dir is not None:
-            keyd_active = True
-        else:
-            service = default_runner(["systemctl", "is-active", "keyd.service"])
-            keyd_active = service.returncode == 0 and service.stdout.strip() == "active"
-    crash = None if keyd_active or keyd_dir is not None else _latest_keyd_crash()
-    agent_configured = False
-    if crash:
-        agent = default_runner(["omarchy-default-agent"])
-        agent_configured = agent.returncode == 0 and bool(agent.stdout.strip())
-    selected = _selected_profile(config, profiles)
-    changed = selected != str(config.get("selectedProfile", ""))
-    if changed:
-        config["selectedProfile"] = selected
-        save_config(config, path)
-    rendered_profiles = []
-    for profile in profiles:
-        current = _match_layout(profile["currentRows"], layouts)
-        payload = dict(profile)
-        payload["configuredLayoutId"] = str(current.get("id", "")) if current else ""
-        payload["currentLayoutId"] = str(current.get("id", "")) if current and keyd_active else ""
-        payload["currentName"] = (
-            str(current.get("name", "Unknown layout"))
-            if current and keyd_active
-            else "keyd is not running"
-            if not keyd_active
-            else "Unknown layout"
-        )
-        payload["currentBrief"] = str(current.get("brief", "KB")) if current and keyd_active else "!"
-        payload["keydActive"] = keyd_active
-        payload["canApply"] = bool(profile["ready"] and helper["installed"] and helper["pkexecAvailable"])
-        payload["needsSetup"] = bool(not profile["ready"] or not helper["installed"])
-        if profile["ready"] and not helper["installed"]:
-            payload["setupReason"] = "The managed keyd layout is ready, but its runtime helper needs to be installed."
-        rendered_profiles.append(payload)
-    filtered = search_layouts(layouts, query, limit) if query else layouts
-    return {
-        "ok": True,
-        "version": SCHEMA_VERSION,
-        "selectedProfile": selected,
-        "keydActive": keyd_active,
-        "keydCrash": crash,
-        "agentConfigured": agent_configured,
-        "profiles": rendered_profiles,
-        "layouts": filtered,
-        "helper": helper,
-        "configPath": str(path or config_path()),
-        "keydDirectory": str(keyd_dir or keyd_directory()),
-    }
+def all_layouts(config: dict[str, Any], _profiles: Sequence[dict[str, Any]] = ()) -> list[dict[str, Any]]:
+    return [*_builtin_layouts(), *_stored_layouts(config)]
 
 
 def search_layouts(
@@ -627,18 +382,280 @@ def search_layouts(
     matches = [
         layout
         for layout in layouts
-        if all(token in f"{layout.get('name', '')} {layout.get('id', '')} {layout.get('brief', '')}".lower() for token in tokens)
+        if all(
+            token
+            in f"{layout.get('name', '')} {layout.get('id', '')} {layout.get('brief', '')}".lower()
+            for token in tokens
+        )
     ]
     return [dict(layout) for layout in matches[: max(1, min(limit, 100))]]
 
 
+def hypr_keyboards(runner: Runner = default_runner) -> list[dict[str, Any]]:
+    result = runner(["hyprctl", "-j", "devices"])
+    if result.returncode != 0:
+        raise OmakeydError(
+            "hyprland-unavailable",
+            "Hyprland keyboard devices are unavailable.",
+            result.stderr.strip() or result.stdout.strip(),
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise OmakeydError(
+            "hyprland-response", "Hyprland returned an invalid device list.", str(error)
+        ) from error
+    keyboards = payload.get("keyboards", []) if isinstance(payload, dict) else []
+    if not isinstance(keyboards, list):
+        raise OmakeydError("hyprland-response", "Hyprland returned an invalid keyboard list.")
+    return [item for item in keyboards if isinstance(item, dict)]
+
+
+def _is_typing_keyboard(name: str) -> bool:
+    if not name or not DEVICE_RE.fullmatch(name):
+        return False
+    if name == "keyd-virtual-keyboard" or VIRTUAL_RE.search(name):
+        return False
+    return not UNTYPED_RE.search(name)
+
+
+def discover_profiles(runner: Runner = default_runner) -> list[dict[str, Any]]:
+    profiles = []
+    for keyboard in hypr_keyboards(runner):
+        name = str(keyboard.get("name", ""))
+        if not _is_typing_keyboard(name):
+            continue
+        profiles.append(
+            {
+                "id": name,
+                "label": humanize_identifier(name),
+                "activeKeymap": str(keyboard.get("active_keymap", "")),
+                "activeLayoutIndex": int(keyboard.get("active_layout_index", 0) or 0),
+                "runtimeLayouts": str(keyboard.get("layout", "")),
+                "runtimeVariants": str(keyboard.get("variant", "")),
+            }
+        )
+    profiles.sort(key=lambda item: (item["label"] != "Built-in keyboard", item["label"].lower()))
+    return profiles
+
+
+def _keyd_active(runner: Runner = default_runner) -> bool:
+    result = runner(["systemctl", "is-active", "keyd.service"])
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def _runtime_layout_name(layout: dict[str, Any]) -> str:
+    if layout["id"] == "qwerty":
+        return "us"
+    fingerprint = ",".join(normalized_flat_rows(layout["rows"]))
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:10]
+    safe = re.sub(r"[^a-z0-9_]+", "_", str(layout["id"]).replace("-", "_"))[:32]
+    return f"{GENERATED_PREFIX}{safe}_{digest}"
+
+
+def _xkb_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _xkb_content(layout: dict[str, Any]) -> str:
+    lines = [
+        "// Generated by Omakeyd. Safe to regenerate.",
+        "default partial alphanumeric_keys",
+        'xkb_symbols "basic" {',
+        '    include "us(basic)"',
+        f'    name[Group1] = "{_xkb_string(str(layout["name"]))}";',
+        "",
+    ]
+    for codes, row in zip(ROW_CODES, validate_rows(layout["rows"])):
+        for code, key in zip(codes, row):
+            lower = normalize_key(key)
+            if len(lower) == 1 and lower.isalpha():
+                upper = lower.upper()
+                key_type = "ALPHABETIC"
+            else:
+                upper = SHIFTED_KEYSYM[lower]
+                key_type = "TWO_LEVEL"
+            lines.append(
+                f'    key <{code}> {{ type[Group1] = "{key_type}", [ {lower}, {upper} ] }};'
+            )
+        lines.append("")
+    lines.extend(["};", ""])
+    return "\n".join(lines)
+
+
+def _command_detail(result: CommandResult) -> str:
+    return result.stderr.strip() or result.stdout.strip() or "The command returned no details."
+
+
+def materialize_layout(layout: dict[str, Any], runner: Runner = default_runner) -> str:
+    runtime = _runtime_layout_name(layout)
+    if runtime == "us":
+        return runtime
+    target = xkb_symbols_dir() / runtime
+    content = _xkb_content(layout)
+    previous = target.read_text(encoding="utf-8") if target.exists() else None
+    if previous is not None and not previous.startswith("// Generated by Omakeyd"):
+        raise OmakeydError("xkb-owned", f"Omakeyd will not overwrite {target}.")
+    if previous != content:
+        atomic_write_text(target, content, 0o644)
+    compiled = runner(["xkbcli", "compile-keymap", "--layout", runtime])
+    if compiled.returncode != 0:
+        if previous is None:
+            target.unlink(missing_ok=True)
+        elif previous != content:
+            atomic_write_text(target, previous, 0o644)
+        raise OmakeydError(
+            "layout-invalid", f"XKB could not compile {layout['name']}.", _command_detail(compiled)
+        )
+    return runtime
+
+
+def _lua_string(value: str) -> str:
+    # JSON string literals are valid Lua literals for the restricted ASCII
+    # identifiers accepted by this backend.
+    return json.dumps(value, ensure_ascii=True)
+
+
+def _device_lua(device: str, layouts: str, variants: str) -> str:
+    if not DEVICE_RE.fullmatch(device):
+        raise OmakeydError("profile-id", "Invalid keyboard identifier.")
+    return (
+        "hl.device({ name = "
+        + _lua_string(device)
+        + ", kb_layout = "
+        + _lua_string(layouts)
+        + ", kb_variant = "
+        + _lua_string(variants)
+        + " })"
+    )
+
+
+def _apply_runtime(device: str, runtimes: Sequence[str], index: int, runner: Runner) -> None:
+    layouts = ",".join(runtimes)
+    variants = ",".join("" for _ in runtimes)
+    configured = runner(["hyprctl", "eval", _device_lua(device, layouts, variants)])
+    if configured.returncode != 0 or "error" in configured.stdout.lower():
+        raise OmakeydError(
+            "apply-failed",
+            "Hyprland did not configure the keyboard layouts.",
+            _command_detail(configured),
+        )
+    switched = runner(["hyprctl", "switchxkblayout", device, str(index)])
+    if switched.returncode != 0 or "error" in switched.stdout.lower():
+        raise OmakeydError(
+            "apply-failed", "Hyprland did not switch the keyboard layout.", _command_detail(switched)
+        )
+
+
+def _rollback_runtime(profile: dict[str, Any], runner: Runner) -> None:
+    old_layouts = str(profile.get("runtimeLayouts") or "us")
+    old_variants = str(profile.get("runtimeVariants") or "")
+    runner(["hyprctl", "eval", _device_lua(str(profile["id"]), old_layouts, old_variants)])
+    runner(
+        [
+            "hyprctl",
+            "switchxkblayout",
+            str(profile["id"]),
+            str(int(profile.get("activeLayoutIndex", 0) or 0)),
+        ]
+    )
+
+
+def _current_layout(
+    profile: dict[str, Any], layouts: Sequence[dict[str, Any]]
+) -> dict[str, Any] | None:
+    runtime = str(profile.get("runtimeLayouts", "")).split(",")
+    index = int(profile.get("activeLayoutIndex", 0) or 0)
+    token = runtime[index] if 0 <= index < len(runtime) else ""
+    active_name = str(profile.get("activeKeymap", ""))
+    for layout in layouts:
+        if token == _runtime_layout_name(layout) or active_name == str(layout["name"]):
+            return layout
+        if layout["id"] == "qwerty" and active_name == "English (US)":
+            return layout
+    return None
+
+
+def _select_profile(
+    config: dict[str, Any], profiles: Sequence[dict[str, Any]], path: Path | None
+) -> str:
+    available = {str(profile["id"]) for profile in profiles}
+    previous = str(config.get("selectedProfile", ""))
+    selected = previous if previous in available else str(profiles[0]["id"]) if profiles else ""
+    changed = selected != previous
+    if selected and previous and previous not in available:
+        old_state = config.get("profiles", {}).get(previous, {})
+        new_state = config.setdefault("profiles", {}).setdefault(selected, {})
+        if isinstance(old_state, dict) and not new_state.get("lastLayout"):
+            last = _canonical_layout_id(old_state.get("lastLayout"))
+            if last:
+                new_state["lastLayout"] = last
+                changed = True
+    if changed:
+        config["selectedProfile"] = selected
+        save_config(config, path)
+    return selected
+
+
+def snapshot(
+    query: str = "",
+    limit: int = 60,
+    runner: Runner = default_runner,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    config = load_config(path)
+    profiles = discover_profiles(runner)
+    layouts = all_layouts(config)
+    selected = _select_profile(config, profiles, path)
+    conflict = _keyd_active(runner)
+    rendered = []
+    layout_ids = {str(layout["id"]) for layout in layouts}
+    for profile in profiles:
+        current = _current_layout(profile, layouts)
+        state = config.get("profiles", {}).get(profile["id"], {})
+        configured = _canonical_layout_id(state.get("lastLayout")) if isinstance(state, dict) else ""
+        if configured not in layout_ids:
+            configured = ""
+        payload = dict(profile)
+        payload.update(
+            {
+                "currentLayoutId": str(current.get("id", "")) if current else "",
+                "configuredLayoutId": configured,
+                "currentName": str(current.get("name"))
+                if current
+                else str(profile.get("activeKeymap") or "Unknown layout"),
+                "currentBrief": str(current.get("brief")) if current else "?",
+                "ready": not conflict,
+                "canApply": not conflict,
+                "needsSetup": False,
+            }
+        )
+        rendered.append(payload)
+    return {
+        "ok": True,
+        "version": SCHEMA_VERSION,
+        "backend": "Hyprland/XKB",
+        "selectedProfile": selected,
+        "profiles": rendered,
+        "layouts": search_layouts(layouts, query, limit) if query else layouts,
+        "keydConflict": conflict,
+        "conflictMessage": (
+            "keyd is running and owns the keyboard input path. Stop or disable keyd before using Omakeyd."
+            if conflict
+            else ""
+        ),
+        "configPath": str(path or config_path()),
+        "xkbSymbolsPath": str(xkb_symbols_dir()),
+    }
+
+
 def select_profile(profile_id: str, path: Path | None = None) -> dict[str, Any]:
-    if not PROFILE_RE.fullmatch(profile_id):
-        raise OmakeydError("profile-id", "Invalid keyd profile identifier.")
+    if not DEVICE_RE.fullmatch(profile_id):
+        raise OmakeydError("profile-id", "Invalid keyboard identifier.")
     config = load_config(path)
     config["selectedProfile"] = profile_id
     save_config(config, path)
-    return {"ok": True, "selectedProfile": profile_id}
+    return {"ok": True, "selectedProfile": profile_id, "message": "Selected keyboard."}
 
 
 def save_layout(
@@ -655,7 +672,9 @@ def save_layout(
         raise OmakeydError("layout-name", "Give the layout a name.")
     rows = rows_from_strings(top, home, bottom)
     layout_id = identifier.strip() or slugify(clean_name)
-    if not LAYOUT_ID_RE.fullmatch(layout_id) or layout_id == "qwerty":
+    if not identifier and layout_id in {"qwerty", "colemak-dh"}:
+        layout_id += "-custom"
+    if not LAYOUT_ID_RE.fullmatch(layout_id) or layout_id in {"qwerty", "colemak-dh"}:
         raise OmakeydError("layout-id", "That layout identifier is reserved or invalid.")
     config = load_config(path)
     entry = {
@@ -675,55 +694,27 @@ def save_layout(
 
 
 def remove_layout(identifier: str, path: Path | None = None) -> dict[str, Any]:
-    if identifier == "qwerty":
-        raise OmakeydError("layout-required", "QWERTY is the safe layout and cannot be removed.")
+    if identifier in {"qwerty", "colemak-dh"}:
+        raise OmakeydError("layout-required", "Built-in layouts cannot be removed.")
     config = load_config(path)
     layouts = config.setdefault("layouts", {})
     if identifier not in layouts:
         raise OmakeydError("layout-missing", "That custom layout no longer exists.")
-    name = str(layouts[identifier].get("name", identifier)) if isinstance(layouts[identifier], dict) else identifier
+    used_by = [
+        profile
+        for profile, state in config.get("profiles", {}).items()
+        if isinstance(state, dict) and _canonical_layout_id(state.get("lastLayout")) == identifier
+    ]
+    if used_by:
+        raise OmakeydError("layout-active", "Switch keyboards using this layout before removing it.")
+    name = (
+        str(layouts[identifier].get("name", identifier))
+        if isinstance(layouts[identifier], dict)
+        else identifier
+    )
     del layouts[identifier]
     save_config(config, path)
     return {"ok": True, "id": identifier, "message": f"Removed {name}."}
-
-
-def _find_profile(profile_id: str, keyd_dir: Path | None = None) -> dict[str, Any]:
-    if not PROFILE_RE.fullmatch(profile_id):
-        raise OmakeydError("profile-id", "Invalid keyd profile identifier.")
-    profile = next(
-        (item for item in discover_profiles(keyd_dir) if item["id"] == profile_id),
-        None,
-    )
-    if not profile:
-        raise OmakeydError(
-            "profile-missing",
-            "That keyd profile no longer exists. No layout was changed.",
-        )
-    return profile
-
-
-def _pkexec_path() -> str:
-    resolved = _resolve_pkexec()
-    if not resolved:
-        raise OmakeydError(
-            "pkexec-missing",
-            "pkexec is required for the constrained keyd helper.",
-        )
-    return resolved
-
-
-def _command_failure(result: CommandResult) -> str:
-    text = result.stderr.strip() or result.stdout.strip()
-    if not text:
-        return "The helper returned no diagnostic output."
-    try:
-        payload = json.loads(result.stdout)
-        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
-            error = payload["error"]
-            return str(error.get("detail") or error.get("message") or text)
-    except json.JSONDecodeError:
-        pass
-    return text
 
 
 def apply_layout(
@@ -731,42 +722,48 @@ def apply_layout(
     layout_id: str,
     runner: Runner = default_runner,
     path: Path | None = None,
-    keyd_dir: Path | None = None,
 ) -> dict[str, Any]:
-    profile = _find_profile(profile_id, keyd_dir)
-    if not profile["ready"]:
-        raise OmakeydError("setup-required", str(profile["setupReason"]))
+    if _keyd_active(runner):
+        raise OmakeydError(
+            "keyd-conflict",
+            "keyd is running, so Omakeyd will not change the keyboard input path.",
+            "Stop or disable keyd first; Omakeyd now switches layouts through Hyprland and XKB.",
+        )
     config = load_config(path)
-    layouts = all_layouts(config, discover_profiles(keyd_dir))
+    layouts = all_layouts(config)
+    layout_id = _canonical_layout_id(layout_id)
     layout = next((item for item in layouts if item["id"] == layout_id), None)
     if not layout:
         raise OmakeydError("layout-missing", "That saved layout no longer exists.")
-    runtime_helper = helper_path()
-    if not runtime_helper.is_file() or not os.access(runtime_helper, os.X_OK):
+    profiles = discover_profiles(runner)
+    profile = next((item for item in profiles if item["id"] == profile_id), None)
+    if not profile:
         raise OmakeydError(
-            "helper-missing",
-            "Omakeyd setup must install its constrained keyd helper before switching.",
+            "profile-missing", "That keyboard is no longer connected. No layout was changed."
         )
-    row_argument = ",".join(normalized_flat_rows(layout["rows"]))
-    command = [
-        _pkexec_path(),
-        str(runtime_helper),
-        "apply",
-        "--profile",
-        profile_id,
-        "--rows",
-        row_argument,
-    ]
-    result = runner(command)
-    if result.returncode != 0:
-        raise OmakeydError(
-            "apply-failed",
-            f"{layout['name']} was not applied.",
-            _command_failure(result),
+    runtimes = [materialize_layout(item, runner) for item in layouts]
+    index = next(index for index, item in enumerate(layouts) if item["id"] == layout_id)
+    try:
+        _apply_runtime(profile_id, runtimes, index, runner)
+        refreshed = next(
+            (item for item in discover_profiles(runner) if item["id"] == profile_id), None
         )
+        if not refreshed or int(refreshed.get("activeLayoutIndex", -1)) != index:
+            raise OmakeydError(
+                "apply-unverified", f"{layout['name']} could not be verified after switching."
+            )
+    except OmakeydError:
+        _rollback_runtime(profile, runner)
+        raise
     config["selectedProfile"] = profile_id
-    profile_state = config.setdefault("profiles", {}).setdefault(profile_id, {})
-    profile_state["lastLayout"] = layout_id
+    saved_profile = config.setdefault("profiles", {}).setdefault(profile_id, {})
+    if not isinstance(saved_profile.get("baseline"), dict):
+        saved_profile["baseline"] = {
+            "layouts": str(profile.get("runtimeLayouts") or "us"),
+            "variants": str(profile.get("runtimeVariants") or ""),
+            "index": int(profile.get("activeLayoutIndex", 0) or 0),
+        }
+    saved_profile["lastLayout"] = layout_id
     save_config(config, path)
     return {
         "ok": True,
@@ -778,102 +775,110 @@ def apply_layout(
     }
 
 
-def setup_profile(
-    profile_id: str,
-    runner: Runner = default_runner,
-    path: Path | None = None,
-    keyd_dir: Path | None = None,
+def restore_layouts(
+    runner: Runner = default_runner, path: Path | None = None
 ) -> dict[str, Any]:
-    profile = _find_profile(profile_id, keyd_dir)
-    helper = _helper_status()
-    if profile["ready"] and helper["installed"]:
+    if _keyd_active(runner):
         return {
-            "ok": True,
-            "profile": profile_id,
-            "message": f"{profile['label']} is already ready.",
+            "ok": False,
+            "restored": [],
+            "errors": [{"message": "keyd is running; no XKB layouts were restored."}],
         }
-    installer = setup_path()
-    if not installer.is_file() or not os.access(installer, os.X_OK):
-        raise OmakeydError("setup-missing", "The Omakeyd setup program is unavailable.")
-    if keyd_dir is not None and keyd_dir.resolve() != DEFAULT_KEYD_DIR:
-        raise OmakeydError("setup-test-path", "Authenticated setup only operates on /etc/keyd.")
-    command = [_pkexec_path(), str(installer), "--profile", profile_id]
-    if profile["ready"]:
-        command.append("--install-only")
-    result = runner(command)
-    if result.returncode != 0:
-        raise OmakeydError(
-            "setup-failed",
-            "Omakeyd setup did not change the keyd profile.",
-            _command_failure(result),
-        )
     config = load_config(path)
-    config["selectedProfile"] = profile_id
-    save_config(config, path)
-    return {
-        "ok": True,
-        "profile": profile_id,
-        "message": (
-            f"Reinstalled the constrained helper for {profile['label']}."
-            if profile["ready"]
-            else f"{profile['label']} is ready. Its current mapping was preserved."
-        ),
-    }
+    profiles = discover_profiles(runner)
+    selected = _select_profile(config, profiles, path)
+    restored = []
+    errors = []
+    for profile in profiles:
+        state = config.get("profiles", {}).get(profile["id"], {})
+        layout_id = _canonical_layout_id(state.get("lastLayout")) if isinstance(state, dict) else ""
+        if not layout_id:
+            continue
+        try:
+            restored.append(apply_layout(profile["id"], layout_id, runner, path))
+        except OmakeydError as error:
+            errors.append({"profile": profile["id"], "message": error.message})
+    return {"ok": not errors, "selectedProfile": selected, "restored": restored, "errors": errors}
 
 
-def restore_layouts(path: Path | None = None, keyd_dir: Path | None = None) -> dict[str, Any]:
-    # The selected mapping lives in the root-owned keyd profile and therefore
-    # survives daemon, compositor, and shell reloads without replaying commands.
-    state = snapshot(path=path, keyd_dir=keyd_dir)
-    return {
-        "ok": True,
-        "restored": [],
-        "selectedProfile": state["selectedProfile"],
-        "message": "keyd already owns the persistent layout state.",
-    }
-
-
-def doctor(
-    runner: Runner = default_runner,
-    path: Path | None = None,
-    keyd_dir: Path | None = None,
+def reset_layouts(
+    runner: Runner = default_runner, path: Path | None = None
 ) -> dict[str, Any]:
-    version = runner(["keyd", "--version"])
-    service = runner(["systemctl", "is-active", "keyd.service"])
-    keyd_active = service.returncode == 0 and service.stdout.strip() == "active"
-    report = snapshot(path=path, keyd_dir=keyd_dir, keyd_active=keyd_active)
+    """Restore the per-device settings that preceded Omakeyd's first apply."""
+    config = load_config(path)
+    connected = {profile["id"]: profile for profile in discover_profiles(runner)}
+    reset = []
+    errors = []
+    for profile_id, state in config.get("profiles", {}).items():
+        baseline = state.get("baseline", {}) if isinstance(state, dict) else {}
+        if profile_id not in connected or not isinstance(baseline, dict):
+            continue
+        layouts = str(baseline.get("layouts") or "")
+        variants = str(baseline.get("variants") or "")
+        try:
+            if not layouts:
+                continue
+            configured = runner(
+                ["hyprctl", "eval", _device_lua(profile_id, layouts, variants)]
+            )
+            if configured.returncode != 0 or "error" in configured.stdout.lower():
+                raise OmakeydError("reset-failed", "Hyprland did not restore the keyboard.")
+            switched = runner(
+                [
+                    "hyprctl",
+                    "switchxkblayout",
+                    profile_id,
+                    str(int(baseline.get("index", 0) or 0)),
+                ]
+            )
+            if switched.returncode != 0 or "error" in switched.stdout.lower():
+                raise OmakeydError("reset-failed", "Hyprland did not restore the layout index.")
+            reset.append(profile_id)
+        except (OmakeydError, TypeError, ValueError) as error:
+            errors.append({"profile": profile_id, "message": str(error)})
+    return {"ok": not errors, "reset": reset, "errors": errors}
+
+
+def doctor(runner: Runner = default_runner, path: Path | None = None) -> dict[str, Any]:
+    report = snapshot("", 60, runner, path)
+    xkb = runner(["xkbcli", "--version"])
     report["checks"] = {
-        "keydInstalled": version.returncode == 0,
-        "keydVersion": version.stdout.strip(),
-        "keydActive": keyd_active,
-        "profiles": len(report["profiles"]),
-        "readyProfiles": len([profile for profile in report["profiles"] if profile["ready"]]),
-        "helperInstalled": report["helper"]["installed"],
+        "hyprland": True,
+        "xkb": xkb.returncode == 0,
+        "typingKeyboards": len(report["profiles"]),
+        "keydConflict": report["keydConflict"],
+        "privilegedHelpers": False,
     }
     return report
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="omakeyd")
-    parser.add_argument("--version", action="version", version="Omakeyd 0.2.0")
+    parser.add_argument("--version", action="version", version=f"Omakeyd {APP_VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     snapshot_parser = subparsers.add_parser("snapshot", help="Print panel state as JSON")
     snapshot_parser.add_argument("--query", default="")
     snapshot_parser.add_argument("--limit", type=int, default=60)
 
-    layouts_parser = subparsers.add_parser("layouts", aliases=["catalog"], help="Search saved keyd layouts")
+    layouts_parser = subparsers.add_parser(
+        "layouts", aliases=["catalog"], help="Search saved layouts"
+    )
     layouts_parser.add_argument("--query", default="")
     layouts_parser.add_argument("--limit", type=int, default=60)
 
-    select_parser = subparsers.add_parser("select-profile", help="Select a keyd profile")
+    select_parser = subparsers.add_parser("select-profile", help="Select a keyboard")
     select_parser.add_argument("--profile", required=True)
 
-    apply_parser = subparsers.add_parser("apply", help="Apply a saved layout through keyd")
+    apply_parser = subparsers.add_parser(
+        "apply", help="Apply a saved layout through Hyprland"
+    )
     apply_parser.add_argument("--profile", required=True)
     apply_parser.add_argument("--layout-id", required=True)
 
-    save_parser = subparsers.add_parser("layout-save", aliases=["custom-save"], help="Save a positional layout")
+    save_parser = subparsers.add_parser(
+        "layout-save", aliases=["custom-save"], help="Save a positional layout"
+    )
     save_parser.add_argument("--id", default="")
     save_parser.add_argument("--name", required=True)
     save_parser.add_argument("--brief", default="")
@@ -881,42 +886,35 @@ def build_parser() -> argparse.ArgumentParser:
     save_parser.add_argument("--home", required=True)
     save_parser.add_argument("--bottom", required=True)
 
-    remove_parser = subparsers.add_parser("layout-remove", aliases=["favorite-remove"], help="Remove a custom layout")
+    remove_parser = subparsers.add_parser(
+        "layout-remove", aliases=["favorite-remove"], help="Remove a custom layout"
+    )
     remove_parser.add_argument("--id", required=True)
 
-    setup_parser = subparsers.add_parser("setup", help="Prepare one keyd profile")
-    setup_parser.add_argument("--profile", required=True)
-
-    subparsers.add_parser("restore", help="Report persistent keyd state")
-    subparsers.add_parser("doctor", help="Print keyd integration diagnostics")
+    subparsers.add_parser("restore", help="Reapply saved per-keyboard layouts")
+    subparsers.add_parser("reset", help="Restore keyboard settings from before Omakeyd")
+    subparsers.add_parser("doctor", help="Print Hyprland/XKB diagnostics")
     return parser
 
 
 def dispatch(args: argparse.Namespace, runner: Runner = default_runner) -> dict[str, Any]:
     if args.command == "snapshot":
-        return snapshot(args.query, args.limit)
+        return snapshot(args.query, args.limit, runner)
     if args.command in ("layouts", "catalog"):
-        state = snapshot(args.query, args.limit)
+        state = snapshot(args.query, args.limit, runner)
         return {"ok": True, "layouts": state["layouts"]}
     if args.command == "select-profile":
         return select_profile(args.profile)
     if args.command == "apply":
         return apply_layout(args.profile, args.layout_id, runner)
     if args.command in ("layout-save", "custom-save"):
-        return save_layout(
-            args.name,
-            args.brief,
-            args.top,
-            args.home,
-            args.bottom,
-            args.id,
-        )
+        return save_layout(args.name, args.brief, args.top, args.home, args.bottom, args.id)
     if args.command in ("layout-remove", "favorite-remove"):
         return remove_layout(args.id)
-    if args.command == "setup":
-        return setup_profile(args.profile, runner)
     if args.command == "restore":
-        return restore_layouts()
+        return restore_layouts(runner)
+    if args.command == "reset":
+        return reset_layouts(runner)
     if args.command == "doctor":
         return doctor(runner)
     raise OmakeydError("command", "Unknown Omakeyd command.")

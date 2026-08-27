@@ -4,7 +4,7 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_dir"
 
-python -m py_compile omakeyd/core.py bin/omakeyd helper/omakeyd-helper helper/omakeyd-setup
+python -m py_compile omakeyd/core.py bin/omakeyd
 python -m unittest discover -s tests -v
 
 if command -v omarchy >/dev/null 2>&1; then

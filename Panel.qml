@@ -70,8 +70,7 @@ Panel {
       result.push({
         value: String(profile.id || ""),
         label: String(profile.label || profile.id || "Unknown profile"),
-        description: profile.ready
-          ? String(profile.currentName || "Ready") : "Setup required"
+        description: String(profile.currentName || "Unknown layout")
       })
     }
     return result
@@ -219,11 +218,6 @@ Panel {
     view = "home"
   }
 
-  function showSetup() {
-    view = "setup"
-    open()
-  }
-
   function showStudio() {
     beginEditor(currentLayout, false)
     open()
@@ -272,13 +266,6 @@ Panel {
     ], "apply")
   }
 
-  function setupProfile() {
-    if (!selectedProfile) return
-    runAction([
-      backendCommand, "setup", "--profile", selectedProfileId
-    ], "setup")
-  }
-
   function saveEditor() {
     runAction([
       backendCommand, "layout-save",
@@ -301,17 +288,6 @@ Panel {
   function layoutIsActive(layout) {
     return selectedProfile && layout
       && String(layout.id || "") === String(selectedProfile.currentLayoutId || "")
-  }
-
-  function diagnoseKeydCrash() {
-    var crash = snapshot.keydCrash
-    if (!crash || !snapshot.agentConfigured) return
-    Quickshell.execDetached([
-      "omarchy", "agent", "crash",
-      String(crash.pid), String(crash.process || "keyd"),
-      String(crash.executable || "/usr/bin/keyd"), String(crash.signal || "unknown")
-    ])
-    root.close()
   }
 
   onOpenedChanged: if (opened) refresh()
@@ -350,8 +326,7 @@ Panel {
         var payload = root.parsePayload(actionOutput.text, exitCode)
         root.notice = String(payload.message || "Done")
         root.noticeError = false
-        if (root.pendingAction === "save" || root.pendingAction === "remove"
-            || root.pendingAction === "setup")
+        if (root.pendingAction === "save" || root.pendingAction === "remove")
           root.view = "home"
         root.refresh()
       } catch (error) {
@@ -419,18 +394,16 @@ Panel {
             width: parent.width
             title: root.view === "editor"
               ? (root.editorId ? "Edit layout" : "New layout")
-              : root.view === "setup"
-                ? "Connect Omakeyd to keyd"
-                : root.view === "details"
-                  ? "Keyd details"
+              : root.view === "details"
+                  ? "Keyboard details"
                   : root.selectedProfile
                     ? String(root.selectedProfile.currentName || "Unknown layout")
-                    : "No keyd profile"
+                    : "No keyboard"
             meta: root.view === "editor"
               ? "Visual positional editor"
               : root.selectedProfile
                 ? String(root.selectedProfile.label || root.selectedProfile.id)
-                : "Add a keyboard profile under /etc/keyd"
+                : "Connect a keyboard"
             detail: root.view === "home" && root.selectedProfile
               ? String(root.selectedProfile.currentBrief || "KB") : ""
             foreground: root.contentForeground
@@ -456,7 +429,7 @@ Panel {
               spacing: Style.space(7)
 
               PanelSectionHeader {
-                text: "KEYD PROFILE"
+                text: "KEYBOARD"
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
               }
@@ -467,8 +440,8 @@ Panel {
                 showLabel: false
                 value: root.selectedProfileId
                 options: root.profileOptions
-                placeholderText: "Choose a keyd profile..."
-                emptyText: "No keyd profiles"
+                placeholderText: "Choose a keyboard..."
+                emptyText: "No keyboards"
                 foreground: root.contentForeground
                 onChanged: function(value) { root.chooseProfile(value) }
               }
@@ -477,7 +450,9 @@ Panel {
             Text {
               visible: root.profiles.length === 0
               width: parent.width
-              text: "Omakeyd could not find a keyd device profile. keyd profiles normally live in /etc/keyd and contain an [ids] section."
+              text: root.snapshot.keydConflict === true
+                ? String(root.snapshot.conflictMessage || "keyd is running. Stop it before using Omakeyd.")
+                : "Omakeyd could not find a physical keyboard."
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.body
@@ -485,84 +460,21 @@ Panel {
             }
 
             Column {
-              visible: root.selectedProfile && root.snapshot.keydActive === false
-              width: parent.width
-              spacing: Style.space(8)
-
-              PanelSeparator { foreground: root.contentForeground }
-
-              PanelSectionHeader {
-                text: "KEYD IS STOPPED"
-                foreground: root.contentUrgent
-                fontFamily: root.contentFontFamily
-              }
-
-              Text {
-                width: parent.width
-                text: "Your saved layout is safe, but it is not active. Restart keyd to restore it."
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-
-              RowLayout {
-                width: parent.width
-                spacing: Style.space(8)
-
-                Button {
-                  text: "RESTART KEYD"
-                  selected: true
-                  enabled: !root.busy && root.configuredLayout !== null
-                  fontSize: Style.font.caption
-                  horizontalPadding: Style.space(10)
-                  verticalPadding: Style.space(6)
-                  onClicked: root.applyLayout(root.configuredLayout)
-                }
-
-                Button {
-                  visible: root.snapshot.keydCrash !== null && root.snapshot.keydCrash !== undefined
-                  text: "DIAGNOSE WITH AI"
-                  enabled: root.snapshot.agentConfigured === true
-                  tooltipText: enabled
-                    ? "Open this crash in your default Omarchy agent"
-                    : "Choose a default agent in Omarchy first"
-                  fontSize: Style.font.caption
-                  horizontalPadding: Style.space(10)
-                  verticalPadding: Style.space(6)
-                  onClicked: root.diagnoseKeydCrash()
-                }
-              }
-
-              Text {
-                visible: root.snapshot.keydCrash !== null
-                  && root.snapshot.keydCrash !== undefined
-                  && root.snapshot.agentConfigured !== true
-                width: parent.width
-                text: "A keyd crash was recorded. Choose a default agent under Omarchy Setup to enable AI diagnosis."
-                color: root.contentDim
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            Column {
-              visible: root.selectedProfile && root.selectedProfile.needsSetup
+              visible: root.snapshot.keydConflict === true
               width: parent.width
               spacing: Style.space(9)
 
               PanelSeparator { foreground: root.contentForeground }
 
               PanelSectionHeader {
-                text: "SETUP REQUIRED"
-                foreground: root.contentForeground
+                text: "KEYD IS RUNNING"
+                foreground: root.contentUrgent
                 fontFamily: root.contentFontFamily
               }
 
               Text {
                 width: parent.width
-                text: root.selectedProfile ? String(root.selectedProfile.setupReason || "One-time setup is required.") : ""
+                text: String(root.snapshot.conflictMessage || "Stop or disable keyd before using Omakeyd.")
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
@@ -571,26 +483,17 @@ Panel {
 
               Text {
                 width: parent.width
-                text: "Your current mapping stays active. Review the exact migration before authenticating once."
+                text: "Omakeyd uses Hyprland and XKB directly. It will not stop keyd or change system services for you."
                 color: root.contentDim
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
               }
 
-              Button {
-                text: "REVIEW SETUP"
-                selected: true
-                enabled: !root.busy
-                fontSize: Style.font.caption
-                horizontalPadding: Style.space(10)
-                verticalPadding: Style.space(6)
-                onClicked: root.view = "setup"
-              }
             }
 
             Column {
-              visible: root.selectedProfile && root.selectedProfile.ready
+              visible: root.selectedProfile
               width: parent.width
               spacing: Style.space(7)
 
@@ -718,74 +621,13 @@ Panel {
 
                 Button {
                   iconText: "\uf05a"
-                  tooltipText: "Keyd details"
+                  tooltipText: "Keyboard details"
                   enabled: !root.busy
                   horizontalPadding: Style.space(7)
                   verticalPadding: Style.space(6)
                   onClicked: root.view = "details"
                 }
               }
-            }
-          }
-
-          Column {
-            visible: root.view === "setup"
-            width: parent.width
-            spacing: Style.space(11)
-
-            PanelSectionHeader {
-              text: "ONE-TIME KEYD SETUP"
-              foreground: root.contentForeground
-              fontFamily: root.contentFontFamily
-            }
-
-            Text {
-              width: parent.width
-              text: root.selectedProfile && root.selectedProfile.ready
-                ? "Omakeyd will reinstall its constrained root-owned helper. The existing managed keyd profile and active layout will not change."
-                : "Omakeyd will preserve the layout you are using now, add one managed keyd letter layer, and make a timestamped backup beside the original file."
-              color: root.contentForeground
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
-              width: parent.width
-              text: root.selectedProfile ? String(root.selectedProfile.configPath || "") : ""
-              color: root.contentDim
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WrapAnywhere
-            }
-
-            Text {
-              width: parent.width
-              text: "Authentication is requested once. Routine switches then use a root-owned helper that accepts only a complete permutation of the 30 letter and punctuation keys—no commands, macros, or arbitrary file paths."
-              color: root.contentDim
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.font.body
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
-              width: parent.width
-              text: "XKB remains US. Omakeyd will not add you to keyd's privileged socket group."
-              color: root.contentDim
-              font.family: root.contentFontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Button {
-              text: root.busy && root.pendingAction === "setup" ? "SETTING UP..." : "AUTHENTICATE & SET UP"
-              selected: true
-              enabled: !root.busy && root.selectedProfile
-                && root.snapshot.helper && root.snapshot.helper.setupAvailable
-              fontSize: Style.font.caption
-              horizontalPadding: Style.space(10)
-              verticalPadding: Style.space(6)
-              onClicked: root.setupProfile()
             }
           }
 
@@ -940,7 +782,7 @@ Panel {
             spacing: Style.space(9)
 
             PanelSectionHeader {
-              text: "KEYD INTEGRATION"
+              text: "HYPRLAND / XKB"
               foreground: root.contentForeground
               fontFamily: root.contentFontFamily
             }
@@ -948,10 +790,10 @@ Panel {
             Text {
               width: parent.width
               text: root.selectedProfile
-                ? "Profile: " + String(root.selectedProfile.id || "")
-                  + "\nManaged layer: " + String(root.selectedProfile.managedLayer || "")
-                  + "\nConfig: " + String(root.selectedProfile.configPath || "")
-                : "No selected profile"
+                ? "Keyboard: " + String(root.selectedProfile.id || "")
+                  + "\nActive keymap: " + String(root.selectedProfile.activeKeymap || "")
+                  + "\nLayout index: " + String(root.selectedProfile.activeLayoutIndex || 0)
+                : "No selected keyboard"
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -960,10 +802,8 @@ Panel {
 
             Text {
               width: parent.width
-              text: root.snapshot.helper
-                ? "Helper: " + (root.snapshot.helper.installed ? "installed" : "not installed")
-                  + "\n" + String(root.snapshot.helper.path || "")
-                : "Helper status unavailable"
+              text: "Layouts: " + String(root.selectedProfile ? root.selectedProfile.runtimeLayouts || "" : "")
+                + "\nGenerated symbols: " + String(root.snapshot.xkbSymbolsPath || "")
               color: root.contentDim
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.caption
@@ -972,7 +812,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: "Routine switching rewrites only the marked 30-key layer, validates it with keyd check, restarts keyd, and rolls back if keyd does not stay healthy."
+              text: "Omakeyd creates user-owned XKB layouts and switches this keyboard through Hyprland. It does not use root access or change system services."
               color: root.contentForeground
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.body
@@ -995,8 +835,8 @@ Panel {
             visible: root.refreshing || root.busy
             width: parent.width
             text: root.busy
-              ? (root.pendingAction === "apply" ? "Switching keyd layout..." : "Working...")
-              : "Reading keyd profiles..."
+              ? (root.pendingAction === "apply" ? "Switching keyboard layout..." : "Working...")
+              : "Reading keyboards..."
             color: root.contentDim
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.caption

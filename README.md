@@ -1,39 +1,31 @@
 # Omakeyd
 
-Omakeyd is an Omarchy bar plugin for switching letter layouts on keyboards
-managed by [keyd](https://github.com/rvaiya/keyd).
-
-keyd is a Linux service that remaps keys before they reach desktop applications.
-It is commonly used for layouts such as Colemak on built-in keyboards. Omakeyd
-adds a small interface for switching those mappings without editing keyd
-configuration by hand.
+Omakeyd is an Omarchy bar plugin for switching keyboard layouts. It includes
+QWERTY (US), Colemak-DH, and a simple editor for custom layouts.
 
 ![Omakeyd showing QWERTY and Colemak-DH](preview.png)
 
 ## What it does
 
-- Keeps QWERTY and your saved layouts one click away.
-- Detects the letter mapping already present in a keyd profile.
-- Switches one selected keyd profile at a time.
-- Provides a visual three-row editor for custom layouts.
-- Shows a profile selector when more than one keyd profile is available.
-- Leaves Omarchy's normal US keyboard setting unchanged; keyd performs the
-  remapping underneath.
+- Shows the active layout in the Omarchy bar.
+- Opens a panel for switching layouts directly.
+- Switches one physical keyboard at a time.
+- Shows a keyboard selector when several keyboards are connected.
+- Lets you create custom layouts by rearranging 30 letter and punctuation keys.
 
-Omakeyd changes only the 30 letter and punctuation positions shown in its
-editor. It does not create keyd macros, shortcuts, or arbitrary commands.
+Omakeyd uses Hyprland's per-device keyboard settings and XKB. Switching is fast,
+does not restart a service, and does not require root access.
 
 ## Requirements
 
 - Omarchy Quattro
-- Python 3
-- keyd installed and running
-- A keyd device profile under `/etc/keyd/` with an `[ids]` section
-- PolicyKit and `pkexec` for the one-time setup
+- Hyprland with Lua configuration support
+- `xkbcli`
 
-Omakeyd is intended for keyboards managed by keyd. Keyboards remapped only in
-firmware, or keyboards without a keyd profile, do not appear in the profile
-selector.
+Omakeyd cannot run alongside
+[keyd](https://github.com/rvaiya/keyd). keyd is a system service that remaps
+keyboard input before it reaches Hyprland. If keyd is running, Omakeyd shows the
+conflict and does not change the keyboard.
 
 ## Install
 
@@ -43,106 +35,70 @@ Install and enable Omakeyd with the standard Omarchy plugin command:
 omarchy plugin add https://github.com/olivoil/omakeyd.git --enable
 ```
 
-If Omarchy's first-party keyboard-layout badge is also enabled:
+Omakeyd is placed on the right side of the bar by default. Omarchy prompts for
+placement during installation, so you can choose another section.
+
+If Omarchy's first-party keyboard-layout badge is also enabled, you can disable
+it to avoid showing two layout indicators:
 
 ```bash
 omarchy plugin disable omarchy.keyboard-layout
 ```
 
-## First setup
-
-Omakeyd must prepare each keyd profile once before it can switch that profile.
-
-1. Open Omakeyd and select the profile.
-2. Choose **Review setup**.
-3. Review the exact keyd file that will change.
-4. Choose **Authenticate & set up** and approve the PolicyKit prompt.
-
-Setup then:
-
-- Creates a timestamped backup beside the original keyd profile.
-- Preserves the current 30-key mapping as an Omakeyd layout.
-- Adds one clearly marked Omakeyd-managed layout block.
-- Validates the staged profile with `keyd check`.
-- Restarts keyd, checks that it stays healthy, and restores the original file
-  if activation fails.
-- Installs a small restricted helper and PolicyKit action for later switches.
-
-Routine layout switches do not require another password. The helper accepts only
-a keyd profile identifier and a complete permutation of the 30 supported keys.
-
-Automatic setup supports simple profiles whose letter mappings are in
-`[main]`. Omakeyd refuses profiles that already use `setlayout()` or a
-non-main default layout because changing them automatically would be ambiguous.
-
 ## Use
 
-- Click the keyboard indicator in the bar to open Omakeyd.
-- If several keyd profiles exist, select the keyboard profile first.
-- Choose **Switch** beside a saved layout.
-- Choose **New layout** to create a layout in the visual editor.
-- Use the info button for profile, helper, and configuration details.
-- Scroll or right-click the bar indicator to cycle layouts for the selected
-  ready profile.
+- Click the keyboard indicator to open the layout panel.
+- Choose **Switch** beside a layout.
+- Choose **New layout** to create a custom layout.
+- Scroll or right-click the bar indicator to cycle layouts.
+- If several keyboards are connected, select the keyboard at the top first.
 
-If keyd stops, Omakeyd shows that no layout is active and offers to restart it.
-When Omarchy has recorded a keyd crash, Omakeyd can also hand it to the default
-Omarchy agent through the standard **Diagnose with AI** flow.
+QWERTY and Colemak-DH are built in and cannot be deleted. The included
+Colemak-DH layout keeps Z on the physical Z key rather than applying the ISO
+angle modification.
 
-QWERTY is always available and cannot be deleted.
-
-## System access
-
-Before setup, Omakeyd reads keyd profiles under `/etc/keyd/` but does not
-modify them. It stores user settings in:
+Omakeyd stores its settings and generated XKB symbols in:
 
 ```text
 ~/.config/omakeyd/config.json
+~/.config/xkb/symbols/omakeyd_*
 ```
 
-During the explicit authenticated setup, Omakeyd modifies only the selected
-keyd profile and installs:
-
-```text
-/usr/local/libexec/omakeyd-helper
-/usr/share/polkit-1/actions/io.github.olivoil.omakeyd.policy
-```
-
-It does not make network requests, add the user to keyd's privileged group, or
-modify Hyprland and desktop keyboard configuration.
+These are user-owned files. Omakeyd does not install a privileged helper,
+PolicyKit rule, system service, or file under `/etc` or `/usr`.
 
 ## Remove
 
-Remove the plugin checkout with the standard Omarchy command:
+Remove Omakeyd with the standard Omarchy plugin command:
 
 ```bash
 omarchy plugin remove io.github.olivoil.omakeyd
 ```
 
-Removing the checkout does not undo the one-time keyd setup. This preserves the
-active keyboard mapping and its backup instead of changing input behavior during
-uninstallation.
+When the plugin is unloaded, it restores the per-keyboard XKB settings that
+were active before Omakeyd first changed them.
 
-To restore the original keyd profile, use the exact backup path reported during
-setup:
+The generated XKB files and saved layout definitions are harmless and remain in
+your user configuration so a reinstall keeps your layouts. They can be removed
+manually if you no longer want them.
 
-```bash
-sudo install -o root -g root -m 0644 \
-  /etc/keyd/PROFILE.conf.omakeyd-backup-TIMESTAMP \
-  /etc/keyd/PROFILE.conf
-sudo keyd check /etc/keyd/PROFILE.conf
-sudo systemctl restart keyd.service
-```
+## Upgrading from 0.2
 
-After restoring the profile, the installed runtime files can be removed
-separately:
+Omakeyd 0.2 used keyd and installed a privileged helper after authentication.
+Version 0.3 no longer uses that design. It migrates the saved Colemak-DH layout
+name automatically, but keyd must be stopped or disabled before the new backend
+can control the physical keyboard.
+
+The old helper and PolicyKit action are not used by 0.3. Existing 0.2 users may
+remove those two old files after confirming the new version works:
 
 ```bash
 sudo rm -f /usr/local/libexec/omakeyd-helper
 sudo rm -f /usr/share/polkit-1/actions/io.github.olivoil.omakeyd.policy
 ```
 
-Replace the placeholders with the profile and backup names shown by Omakeyd.
+Do not remove an existing `/etc/keyd/*.conf` profile until you have confirmed
+your layouts work without keyd; it may contain other remaps you still need.
 
 ## Command line
 
@@ -150,8 +106,8 @@ The backend prints JSON:
 
 ```bash
 bin/omakeyd snapshot
-bin/omakeyd apply --profile laptop-colemak-dh --layout-id qwerty
-bin/omakeyd apply --profile laptop-colemak-dh --layout-id colemak-dh-yoga
+bin/omakeyd apply --profile at-translated-set-2-keyboard --layout-id qwerty
+bin/omakeyd apply --profile at-translated-set-2-keyboard --layout-id colemak-dh
 bin/omakeyd doctor
 ```
 
@@ -162,9 +118,6 @@ Run the complete local check:
 ```bash
 scripts/ci.sh
 ```
-
-The suite covers profile discovery, configuration migration, layout validation,
-helper isolation, failure rollback, the plugin contract, and panel linting.
 
 See [architecture](docs/architecture.md) and
 [mapping model](docs/mapping-pipeline.md) for implementation details.
