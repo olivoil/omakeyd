@@ -509,10 +509,14 @@ def _selected_profile(config: dict[str, Any], profiles: Sequence[dict[str, Any]]
     return str(profiles[0]["id"]) if profiles else ""
 
 
+def _resolve_pkexec() -> str | None:
+    return os.environ.get("OMAKEYD_PKEXEC") or shutil.which("pkexec")
+
+
 def _helper_status() -> dict[str, Any]:
     runtime = helper_path()
     setup = setup_path()
-    pkexec = shutil.which("pkexec")
+    pkexec = _resolve_pkexec()
     return {
         "installed": runtime.is_file() and os.access(runtime, os.X_OK),
         "path": str(runtime),
@@ -699,8 +703,7 @@ def _find_profile(profile_id: str, keyd_dir: Path | None = None) -> dict[str, An
 
 
 def _pkexec_path() -> str:
-    override = os.environ.get("OMAKEYD_PKEXEC")
-    resolved = override or shutil.which("pkexec")
+    resolved = _resolve_pkexec()
     if not resolved:
         raise OmakeydError(
             "pkexec-missing",

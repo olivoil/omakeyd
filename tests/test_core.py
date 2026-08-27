@@ -139,6 +139,14 @@ class OmakeydCoreTests(unittest.TestCase):
         self.assertEqual(profile["currentLayoutId"], "qwerty")
         self.assertEqual(profile["currentName"], "QWERTY (US)")
 
+    def test_snapshot_honors_the_pkexec_override_when_path_lookup_fails(self) -> None:
+        self.write_profile(self.managed_profile(core.DISPLAY_ROWS))
+        with patch("omakeyd.core.shutil.which", return_value=None):
+            payload = core.snapshot(path=self.config, keyd_dir=self.keyd)
+
+        self.assertTrue(payload["helper"]["pkexecAvailable"])
+        self.assertTrue(payload["profiles"][0]["canApply"])
+
     def test_layout_must_be_a_complete_permutation(self) -> None:
         rows = [list(row) for row in core.DISPLAY_ROWS]
         rows[0][1] = "q"
