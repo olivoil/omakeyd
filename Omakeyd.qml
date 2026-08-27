@@ -39,6 +39,8 @@ BarWidget {
     return lines.join("\n")
   }
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  readonly property bool popoutSwitchClosing: panelLoader.item
+    ? panelLoader.item.popoutSwitchClosing === true : false
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -74,6 +76,11 @@ BarWidget {
 
   function close() {
     if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
+  }
+
+  function closeForPopoutSwitch() {
+    if (panelLoader.item && panelLoader.item.closeForPopoutSwitch)
+      panelLoader.item.closeForPopoutSwitch()
   }
 
   function openSetup() {

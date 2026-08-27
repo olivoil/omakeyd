@@ -440,7 +440,7 @@ def _detected_layout(rows: Sequence[Sequence[Any]], label: str) -> dict[str, Any
     if _rows_equal(validated, COLEMAK_DH_YOGA_ROWS):
         return {
             "id": "colemak-dh-yoga",
-            "name": "Colemak-DH Yoga",
+            "name": "Colemak-DH",
             "brief": "DH",
             "rows": validated,
             "source": "detected",

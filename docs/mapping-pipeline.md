@@ -13,7 +13,7 @@ For physical QWERTY, the mapping is the identity:
 physical E → keyd emits E
 ```
 
-For the Yoga Colemak-DH map:
+For the known Colemak-DH map:
 
 ```text
 physical E → keyd emits F

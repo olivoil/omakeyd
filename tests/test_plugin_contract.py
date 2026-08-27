@@ -28,6 +28,14 @@ class PluginContractTests(unittest.TestCase):
         self.assertNotIn("FIND A LAYOUT", panel)
         self.assertNotIn("PHYSICAL REMAP", panel)
 
+    def test_panel_uses_the_bar_widget_as_its_popout_identity(self) -> None:
+        widget = (ROOT / "Omakeyd.qml").read_text(encoding="utf-8")
+        panel = (ROOT / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn("readonly property var barIdentity: hostWidget || root", panel)
+        self.assertIn("owner: root.barIdentity", panel)
+        self.assertIn("readonly property bool popoutSwitchClosing:", widget)
+        self.assertIn("function closeForPopoutSwitch()", widget)
+
     def test_backend_is_executable(self) -> None:
         backend = ROOT / "bin" / "omakeyd"
         self.assertTrue(backend.stat().st_mode & 0o111)

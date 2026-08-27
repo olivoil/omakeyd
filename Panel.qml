@@ -13,6 +13,7 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
+  readonly property var barIdentity: hostWidget || root
   property string backendCommand: "omakeyd"
   property var snapshot: ({})
   property bool busy: false
@@ -364,7 +365,7 @@ Panel {
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
-    owner: root
+    owner: root.barIdentity
     bar: root.bar
     open: root.opened
     centerOnBar: true
@@ -681,7 +682,7 @@ Panel {
                       Button {
                         text: root.layoutIsActive(layoutRow.modelData) ? "CURRENT" : "SWITCH"
                         selected: root.layoutIsActive(layoutRow.modelData)
-                        enabled: !root.busy && root.selectedProfile.canApply
+                        enabled: !root.busy && !!root.selectedProfile && root.selectedProfile.canApply
                           && !root.layoutIsActive(layoutRow.modelData)
                         fontSize: Style.font.caption
                         horizontalPadding: Style.space(8)

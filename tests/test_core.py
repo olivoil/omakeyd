@@ -117,6 +117,9 @@ class OmakeydCoreTests(unittest.TestCase):
         self.assertEqual(profile["currentRows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
         self.assertFalse(profile["ready"])
 
+        layout = core._detected_layout(profile["currentRows"], profile["label"])
+        self.assertEqual(layout["name"], "Colemak-DH")
+
     def test_snapshot_is_profile_first_and_has_no_hyprland_devices(self) -> None:
         self.write_profile()
         payload = core.snapshot(path=self.config, keyd_dir=self.keyd)
@@ -157,7 +160,7 @@ class OmakeydCoreTests(unittest.TestCase):
 
     def test_saves_visual_layout_rows_without_creating_xkb_files(self) -> None:
         result = core.save_layout(
-            "Colemak-DH Yoga Copy",
+            "Colemak-DH Copy",
             "dh",
             "q w f p b j l u y ;",
             "a r s t g m n e i o",
@@ -165,7 +168,7 @@ class OmakeydCoreTests(unittest.TestCase):
             path=self.config,
         )
         self.assertEqual(result["layout"]["brief"], "DH")
-        saved = core.load_config(self.config)["layouts"]["colemak-dh-yoga-copy"]
+        saved = core.load_config(self.config)["layouts"]["colemak-dh-copy"]
         self.assertEqual(saved["rows"], [list(row) for row in core.COLEMAK_DH_YOGA_ROWS])
         self.assertEqual(list(self.root.glob("**/xkb/**")), [])
 

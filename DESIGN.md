@@ -45,7 +45,7 @@ layout rows use `Style.font.body`; supporting status uses `Style.font.caption`.
 Bold weight distinguishes the current layout. System identifiers elide on one
 line and remain available in diagnostics.
 
-**The Human Name Rule.** Say “Built-in keyboard” and “Colemak-DH Yoga” before
+**The Human Name Rule.** Say “Built-in keyboard” and “Colemak-DH” before
 showing `laptop-colemak-dh` or another exact identifier.
 
 ## Elevation

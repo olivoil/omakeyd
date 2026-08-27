@@ -37,7 +37,7 @@ The backend reads regular `*.conf` files under `/etc/keyd` and keeps those with
 an `[ids]` section. It composes simple primary-key bindings from `[main]` and the
 configured default layout to describe the current effective rows.
 
-An exact match for the Yoga rows is named **Colemak-DH Yoga**. Other valid
+An exact match for the known Colemak-DH rows is named **Colemak-DH**. Other valid
 one-to-one primary maps are presented as detected layouts. QWERTY is synthesized
 as the identity map, independent of system catalogues.
 
