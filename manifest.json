@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.olivoil.omakeyd",
   "name": "Omakeyd",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Olivier Melcher",
   "description": "Switch keyboard layouts with keyd from the Omarchy bar.",
   "license": "MIT",
