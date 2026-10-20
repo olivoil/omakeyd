@@ -741,8 +741,11 @@ def apply_layout(
         raise OmakeydError(
             "profile-missing", "That keyboard is no longer connected. No layout was changed."
         )
-    runtimes = [materialize_layout(item, runner) for item in layouts]
-    index = next(index for index, item in enumerate(layouts) if item["id"] == layout_id)
+    # Put the selected layout first: omarchy-system-lock resets every keyboard
+    # to layout index 0, which must not silently switch the user back to QWERTY.
+    ordered = [layout] + [item for item in layouts if item["id"] != layout_id]
+    runtimes = [materialize_layout(item, runner) for item in ordered]
+    index = 0
     try:
         _apply_runtime(profile_id, runtimes, index, runner)
         refreshed = next(

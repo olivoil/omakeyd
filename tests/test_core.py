@@ -198,9 +198,11 @@ class OmakeydCoreTests(unittest.TestCase):
         commands = [command[0] for command in runner.commands]
         self.assertNotIn("pkexec", commands)
         self.assertNotIn("sudo", commands)
-        self.assertIn(["hyprctl", "switchxkblayout", "at-translated-set-2-keyboard", "1"], runner.commands)
+        self.assertIn(["hyprctl", "switchxkblayout", "at-translated-set-2-keyboard", "0"], runner.commands)
         eval_command = next(command for command in runner.commands if command[:2] == ["hyprctl", "eval"])
         self.assertIn("hl.device", eval_command[2])
+        # The selected layout comes first so a reset to index 0 (e.g. on lock) keeps it.
+        self.assertIn('kb_layout = "omakeyd_colemak_dh_', eval_command[2])
         self.assertIn("kb_layout", eval_command[2])
         saved = core.load_config(self.config)
         self.assertEqual(
